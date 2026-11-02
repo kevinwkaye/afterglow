@@ -1,0 +1,63 @@
+name: Build Afterglow
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DAFTERGLOW_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build --config Release --parallel 4
+
+      - name: Engine render test
+        run: build\Release\afterglow_render_test.exe
+
+      - name: Validate with pluginval
+        id: pluginval
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri https://github.com/Tracktion/pluginval/releases/latest/download/pluginval_Windows.zip -OutFile pluginval.zip
+          Expand-Archive pluginval.zip -DestinationPath pluginval
+          # pluginval is a windowed app, so wait for it and capture its output
+          $proc = Start-Process -FilePath .\pluginval\pluginval.exe -Wait -PassThru -NoNewWindow `
+            -RedirectStandardOutput pluginval-report.txt -RedirectStandardError pluginval-errors.txt `
+            -ArgumentList '--strictness-level 5 --validate-in-process --skip-gui-tests --timeout-ms 600000 --validate "build\Afterglow_artefacts\Release\VST3\Afterglow.vst3"'
+          $code = $proc.ExitCode
+          Get-Content pluginval-report.txt -Tail 15
+          Get-Content pluginval-report.txt | Select-String -Pattern "FAILED|!!!|Starting test|ERROR|Error|crash|Exception" | Select-Object -Last 40 | ForEach-Object { Write-Output "::warning::$($_.Line)" }
+          exit $code
+
+      - name: Collect plugin
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item -Recurse build\Afterglow_artefacts\Release\VST3\Afterglow.vst3 dist\
+          Copy-Item build\Afterglow_artefacts\Release\Standalone\Afterglow.exe dist\Afterglow-standalone.exe
+          if (Test-Path pluginval-report.txt) { Copy-Item pluginval-report.txt dist\ }
+
+      # Artifact storage counts against the account quota, so the finished
+      # plugin is published to a 'builds' branch instead.
+      - name: Publish to the builds branch
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\* -DestinationPath Afterglow-Windows.zip -Force
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git checkout --orphan builds
+          git rm -r -q --cached .
+          git add -f Afterglow-Windows.zip
+          git commit -q -m "Windows build $env:GITHUB_SHA"
+          git push -f origin builds

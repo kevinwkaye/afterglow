@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(Afterglow VERSION 0.1.0 LANGUAGES C CXX)
+project(Afterglow VERSION 0.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -57,7 +57,9 @@ if(AFTERGLOW_BUILD_PLUGIN)
 
     target_sources(Afterglow PRIVATE
         Source/PluginProcessor.cpp
-        Source/PluginEditor.cpp)
+        Source/PluginEditor.cpp
+        Source/PedalControl.cpp
+        Source/Keeper.cpp)
 
     target_include_directories(Afterglow PRIVATE Source Source/engine)
 
@@ -84,4 +86,26 @@ endif()
 if(AFTERGLOW_BUILD_TESTS)
     add_executable(afterglow_render_test Tests/RenderTest.cpp)
     target_include_directories(afterglow_render_test PRIVATE Source/engine)
+
+    # Footswitch test: drives the real plugin with footswitch MIDI (needs JUCE)
+    if(AFTERGLOW_BUILD_PLUGIN)
+        juce_add_console_app(afterglow_pedal_test PRODUCT_NAME "afterglow_pedal_test")
+        target_sources(afterglow_pedal_test PRIVATE
+            Tests/PedalTest.cpp
+            Source/PluginProcessor.cpp
+            Source/PluginEditor.cpp
+            Source/PedalControl.cpp
+            Source/Keeper.cpp)
+        target_include_directories(afterglow_pedal_test PRIVATE Source Source/engine)
+        target_compile_definitions(afterglow_pedal_test PRIVATE
+            JUCE_WEB_BROWSER=0
+            JUCE_USE_CURL=0
+            JUCE_MODAL_LOOPS_PERMITTED=1
+            JucePlugin_VersionString="${PROJECT_VERSION}")
+        target_link_libraries(afterglow_pedal_test PRIVATE
+            AfterglowData
+            juce::juce_audio_utils
+            juce::juce_dsp
+            juce::juce_recommended_config_flags)
+    endif()
 endif()

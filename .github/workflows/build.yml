@@ -21,8 +21,12 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel 4
 
-      - name: Engine render test
+      - name: Engine render test and CPU report
         run: build\Release\afterglow_render_test.exe
+
+      - name: Footswitch test
+        continue-on-error: true
+        run: build\afterglow_pedal_test_artefacts\Release\afterglow_pedal_test.exe
 
       - name: Validate with pluginval
         id: pluginval
@@ -46,6 +50,7 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item -Recurse build\Afterglow_artefacts\Release\VST3\Afterglow.vst3 dist\
           Copy-Item build\Afterglow_artefacts\Release\Standalone\Afterglow.exe dist\Afterglow-standalone.exe
+          Copy-Item README.md dist\
           if (Test-Path pluginval-report.txt) { Copy-Item pluginval-report.txt dist\ }
 
       # Artifact storage counts against the account quota, so the finished
@@ -61,3 +66,42 @@ jobs:
           git add -f Afterglow-Windows.zip
           git commit -q -m "Windows build $env:GITHUB_SHA"
           git push -f origin builds
+
+  # The live rig runs on a Raspberry Pi, so every plugin also builds for Linux on ARM64.
+  # Portability problems show up here long before the rig exists.
+  linux-arm64:
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ninja-build libfreetype-dev libx11-dev libxrandr-dev libxinerama-dev \
+            libxcursor-dev libasound2-dev libfontconfig1-dev xvfb
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DAFTERGLOW_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build --target Afterglow_VST3 afterglow_render_test afterglow_pedal_test
+
+      - name: Engine render test and CPU report
+        run: build/afterglow_render_test
+
+      - name: Footswitch test
+        run: xvfb-run -a build/afterglow_pedal_test_artefacts/Release/afterglow_pedal_test
+
+      - name: Publish to the builds-linux-arm64 branch
+        run: |
+          cd build/Afterglow_artefacts/Release/VST3
+          zip -qr "$GITHUB_WORKSPACE/Afterglow-Linux-ARM64.zip" Afterglow.vst3
+          cd "$GITHUB_WORKSPACE"
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git checkout --orphan builds-linux-arm64
+          git rm -r -q --cached .
+          git add -f Afterglow-Linux-ARM64.zip
+          git commit -q -m "Linux ARM64 build $GITHUB_SHA"
+          git push -f origin builds-linux-arm64

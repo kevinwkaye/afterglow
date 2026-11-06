@@ -54,22 +54,25 @@ struct OctaveUp
     }
 };
 
-// Eight-line feedback delay network: wide, smooth, gently moving. With shimmer on,
+// Feedback delay network reverb: wide, smooth, gently moving. With shimmer on,
 // an octave-up copy of the tail feeds back in so it climbs.
 class Reverb
 {
 public:
+    static constexpr int N = 16; // sixteen lines: a dense, smooth tail with no metallic ring
+
     void prepare (float sampleRate)
     {
         fs = sampleRate;
-        const float ms[8] = { 31.7f, 37.9f, 43.1f, 47.3f, 53.9f, 61.1f, 67.7f, 79.3f };
-        for (int i = 0; i < 8; ++i)
+        const float ms[N] = { 23.1f, 26.9f, 29.7f, 33.1f, 36.7f, 40.9f, 44.3f, 48.7f,
+                              52.3f, 57.1f, 61.3f, 66.7f, 71.9f, 77.3f, 83.9f, 91.1f };
+        for (int i = 0; i < N; ++i)
         {
-            len[i] = ms[i] * 0.0013f * fs; // a touch larger than a hall
+            len[i] = ms[i] * 0.00125f * fs; // a large hall
             line[i].init (nextPow2 ((int) len[i] + 64));
             damp[i].reset();
-            lfo[i] = 0.13f * (float) i;
-            lfoRate[i] = (0.09f + 0.037f * (float) i) / fs;
+            lfo[i] = 0.07f * (float) i;
+            lfoRate[i] = (0.07f + 0.023f * (float) i) / fs;
         }
         const float sc = fs / 44100.0f;
         const int apL[4] = { 142, 107, 379, 277 }, apR[4] = { 149, 113, 367, 293 };
@@ -99,7 +102,7 @@ public:
     {
         shimmer = shimmerOn;
         const float rt60 = shimmer ? 3.5f + 12.0f * amount : 1.4f + 11.0f * amount * amount + 1.5f * amount;
-        for (int i = 0; i < 8; ++i)
+        for (int i = 0; i < N; ++i)
         {
             gain[i] = std::pow (10.0f, -3.0f * len[i] / (fs * rt60));
             damp[i].setCutoff (shimmer ? 9000.0f : 6500.0f - 2500.0f * amount, fs);
@@ -113,36 +116,41 @@ public:
         for (auto& a : inL) l = a.process (l);
         for (auto& a : inR) r = a.process (r);
 
-        float y[8];
-        for (int i = 0; i < 8; ++i)
+        float y[N];
+        const float depth = 5.0f * fs / 48000.0f;
+        for (int i = 0; i < N; ++i)
         {
             lfo[i] += lfoRate[i];
             if (lfo[i] >= 1.0f) lfo[i] -= 1.0f;
-            const float mod = (6.0f * fs / 48000.0f) * std::sin (kTwoPi * lfo[i]);
-            y[i] = damp[i].process (line[i].tap (len[i] + mod));
+            y[i] = damp[i].process (line[i].tap (len[i] + depth * std::sin (kTwoPi * lfo[i])));
         }
 
         // Fast Walsh-Hadamard mix, energy preserving
-        for (int h = 1; h < 8; h <<= 1)
-            for (int i = 0; i < 8; i += h << 1)
+        for (int h = 1; h < N; h <<= 1)
+            for (int i = 0; i < N; i += h << 1)
                 for (int j = i; j < i + h; ++j)
                 {
                     const float a = y[j], b = y[j + h];
                     y[j] = a + b;
                     y[j + h] = a - b;
                 }
-        const float norm = 0.35355339f;
+        constexpr float norm = 0.25f;
 
         const float shim = shimFeed;
-        for (int i = 0; i < 8; ++i)
+        for (int i = 0; i < N; ++i)
         {
             const float inject = (i & 1) ? r : l;
-            line[i].push (softClip (y[i] * norm * gain[i] + 0.5f * inject + shim * 0.5f));
+            line[i].push (softClip (y[i] * norm * gain[i] + 0.354f * inject + shim * 0.354f));
         }
 
         Stereo out;
-        out.l = (line[0].at (1) + line[2].at (1) + line[4].at (1) + line[6].at (1)) * 0.45f;
-        out.r = (line[1].at (1) + line[3].at (1) + line[5].at (1) + line[7].at (1)) * 0.45f;
+        for (int i = 0; i < N; i += 2)
+        {
+            const float sign = (i & 2) ? -1.0f : 1.0f; // alternate signs keep the sides apart
+            out.l += sign * line[i].at (1);
+            out.r += sign * line[i + 1].at (1);
+        }
+        out = out * 0.32f;
 
         if (shimmer)
         {
@@ -160,9 +168,9 @@ public:
 
 private:
     float fs = 48000.0f;
-    DelayLine line[8];
-    float len[8] = {}, gain[8] = {}, lfo[8] = {}, lfoRate[8] = {};
-    OnePole damp[8];
+    DelayLine line[N];
+    float len[N] = {}, gain[N] = {}, lfo[N] = {}, lfoRate[N] = {};
+    OnePole damp[N];
     Allpass inL[4], inR[4];
     OctaveUp shifter;
     OnePole shimHp, shimLp;

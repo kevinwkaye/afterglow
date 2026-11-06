@@ -2,6 +2,8 @@
 
 Written 4 November 2026 from a cross-plugin audit. Build it in Afterglow's own thread.
 
+**Status, 6 November 2026: built.** Shared PedalControl and Keeper copied from Speckle, the original map moved behind its channel setting, a Pedal page with four footswitch cards, on-screen buttons for every job, and `afterglow_pedal_test` covering the table, the combos and the clash. Defaults as in the table below; the expression pedal plays the Brass Pedal, and the keyboard sustain pedal (CC 64 through Ableton) does too unless it is switched off.
+
 ## What happens today
 
 - The PLUS Pedal II chart (CC 8 to 19) answers on every channel. CC 11 is Decay, so the expression pedal would sweep Decay. This is the urgent fix.

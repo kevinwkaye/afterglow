@@ -2,17 +2,18 @@
 
 // Afterglow: a recreation of the Gamechanger Audio PLUS Pedal II.
 //
-// The input is analysed all the time. When a layer is caught, a short window of
-// recent audio becomes a magnitude spectrum, and the layer resynthesises it with
-// fresh random phases every frame, so it sustains without a loop point. All active
-// layers share one stereo resynthesis, each with its own envelope, darkening Tone
-// curve, Resonance colour and place in the stereo field.
+// The input is analysed all the time. When a layer is caught, the note is measured into
+// its partials and the soft noise around them (see Spectral.h), and the layer rings those
+// partials as pure, phase-continuous sines. Each layer has its own envelope (Rise, hold,
+// Decay), a Tone curve that darkens it as it ages, the dual Resonance and its own place
+// in the stereo field.
 //
 // Plain C++17, no JUCE, so the render test can run it on its own.
 
 #include "DspUtil.h"
 #include "Detector.h"
 #include "Effects.h"
+#include "Spectral.h"
 #include <array>
 
 namespace ag
@@ -21,10 +22,11 @@ enum CatchMode { CatchSingle = 0, CatchGroup, CatchAll };
 enum HoldMode { HoldNone = 0, HoldFirst, HoldAll };
 enum FxPos { FxPre = 0, FxLoop, FxPost };
 enum FsMode { FsWet = 0, FsLatch, FsHide };
+enum InputMode { InputGuitar = 0, InputSynth, InputBass };
 enum EngineMode { ModeNormal = 0, ModeRealPiano, ModePianoGroup, ModeSostenuto };
 enum LayerState { LOff = 0, LRise, LHold, LDecay, LFade, LDamp };
 
-constexpr int kInfinite = 11;      // the LAYERS knob's last stop
+constexpr int kInfinite = 11;       // the LAYERS knob's last stop
 constexpr float kPianoZone = 0.22f; // TONE below this, with HOLD NONE, opens the piano modes
 
 struct Times
@@ -48,12 +50,13 @@ struct EngineParams
     int layers = 4; // 1..10, kInfinite = endless
     float rise = 0.25f, decay = 0.6f, tone = 0.75f, resonance = 0.0f; // resonance -1..1
     int catchMode = CatchAll, holdMode = HoldAll;
+    int inputMode = InputGuitar;
     int fxPos = FxLoop, fxType = FxVerb;
     float fxAmount = 0.5f, fxMix = 0.3f;
     bool killDry = false;
     int fsMode = FsWet;
     bool fsOn = false;
-    float pedal = 0.0f; // brass pedal depth 0..1 from the screen, MIDI or automation
+    float pedal = 0.0f; // brass pedal depth 0..1 from the screen, footswitch, expression, MIDI or automation
     bool bypass = false;
 };
 
@@ -72,7 +75,7 @@ public:
     std::atomic<float> uiLevel[kSlots];
     std::atomic<int> uiState[kSlots]; // 0 off, 1 rising, 2 held, 3 fading
     std::atomic<int> uiActive { 0 }, uiRising { 0 }, uiHeld { 0 }, uiCaptures { 0 }, uiClears { 0 }, uiMode { 0 };
-    std::atomic<float> uiInput { 0.0f }, uiPeak { 0.0f }, uiDepth { 0.0f };
+    std::atomic<float> uiInput { 0.0f }, uiPeak { 0.0f }, uiDepth { 0.0f }, uiWet { 0.0f };
     std::atomic<bool> uiDown { false }, uiGroupClosed { false }, uiLatched { false };
 
     AfterglowEngine()
@@ -83,29 +86,34 @@ public:
     void prepare (double sampleRate)
     {
         fs = (float) sampleRate;
-        n = fs > 60000.0f ? 8192 : 4096;
-        hop = n / 8;
-        half = n / 2;
-        fft.init (n);
-        window.resize ((size_t) n);
-        for (int i = 0; i < n; ++i)
-            window[(size_t) i] = 0.5f - 0.5f * std::cos (kTwoPi * (float) i / (float) n);
-        binHz = fs / (float) n;
+        const int base = fs > 60000.0f ? 8192 : 4096;
+        synth.prepare (fs, base);
+        hop = synth.hopSize();
+        anaNormal.prepare (fs, base, base, hop);
+        anaBass.prepare (fs, base * 2, base, hop);   // bass: twice the frequency detail
 
-        hist.assign ((size_t) nextPow2 (n * 4 + (int) (0.2f * fs)), 0.0f);
+        const int longest = anaBass.span() + (int) (0.1f * fs);
+        hist.assign ((size_t) nextPow2 (longest * 2 + hop), 0.0f);
         histMask = (int64_t) hist.size() - 1;
 
-        auto initLayer = [&] (Layer& l) { l.mag.assign ((size_t) half + 1, 0.0f); l.state = LOff; l.L = 0.0f; };
-        for (auto& l : ring) initLayer (l);
-        for (auto& l : ghosts) initLayer (l);
-        capture.assign ((size_t) half + 1, 0.0f);
-        templ.assign ((size_t) half + 1, 0.0f);
-        work.assign ((size_t) n, {});
-        powL.assign ((size_t) half + 1, 0.0f);
-        powR.assign ((size_t) half + 1, 0.0f);
-        olaL.assign ((size_t) n, 0.0f);
-        olaR.assign ((size_t) n, 0.0f);
-        olaRead = hop;
+        const int noiseBins = base + 1;
+        for (auto& l : ring) { l.v.reserve (noiseBins); l.state = LOff; l.L = 0.0f; }
+        for (auto& l : ghosts) { l.v.reserve (noiseBins); l.state = LOff; l.L = 0.0f; }
+        scratch.reserve (noiseBins);
+        templ.reserve (noiseBins);
+
+        // the synth input's chord-change listener
+        chgN = fs > 60000.0f ? 8192 : 4096;
+        chgFft.init (chgN);
+        chgWin.resize ((size_t) chgN);
+        for (int i = 0; i < chgN; ++i) chgWin[(size_t) i] = 0.5f - 0.5f * std::cos (kTwoPi * (float) i / (float) chgN);
+        chgBuf.assign ((size_t) chgN, {});
+        chgNow.assign ((size_t) chgN / 2, 0.0f);
+        chgPrev.assign ((size_t) chgN / 2, 0.0f);
+        chgRef.assign ((size_t) chgN / 2, 0.0f);
+        chgEvery = (int) (0.08f * fs);
+        chgCount = 0;
+        haveRef = havePrev = false;
 
         det.prepare (fs);
         fx.prepare (fs);
@@ -117,7 +125,7 @@ public:
 
         compEnv = 0.0f;
         compGain = 1.0f;
-        compAtt = 1.0f - std::exp (-1.0f / (0.03f * fs));
+        compAtt = 1.0f - std::exp (-1.0f / (0.08f * fs));
         compRel = 1.0f - std::exp (-1.0f / (0.35f * fs));
         uiCaptures = 0;
         uiClears = 0;
@@ -135,6 +143,8 @@ public:
         resTime = 0.0f;
         lastReleaseSec = -10.0;
         lastPressDur = 10.0;
+        lastCatchSec = -10.0;
+        curInput = InputGuitar;
     }
 
     float sampleRate() const { return fs; }
@@ -148,6 +158,11 @@ public:
         if (clearRequest.exchange (false)) startClear();
 
         mode = modeOf (p);
+        if (p.inputMode != curInput)
+        {
+            curInput = p.inputMode;
+            det.setBass (curInput == InputBass);
+        }
         handlePedal (p);
 
         // effect slot: crossfade through silence when the type or position changes
@@ -163,6 +178,7 @@ public:
         const float fxStep = 1.0f / (0.02f * fs);
         const int skip = (int) (0.03f * fs);
         float peak = uiPeak.load (std::memory_order_relaxed) * 0.9f;
+        float wetPeak = uiWet.load (std::memory_order_relaxed) * 0.9f;
 
         for (int i = 0; i < numSamples; ++i)
         {
@@ -201,23 +217,23 @@ public:
             const float onset = det.process (mono);
             if (onset > 0.0f && down && ! p.bypass && clearState == 0)
                 onOnset (skip);
+            if (curInput == InputSynth && ++chgCount >= chgEvery)
+            {
+                chgCount = 0;
+                listenForChange();
+            }
 
             while (npend > 0 && clock >= pend[0].at)
                 runCapture();
 
             // resynthesis
-            if (olaRead >= hop)
+            if (synth.frameDue())
             {
-                std::copy (olaL.begin() + hop, olaL.end(), olaL.begin());
-                std::copy (olaR.begin() + hop, olaR.end(), olaR.begin());
-                std::fill (olaL.end() - hop, olaL.end(), 0.0f);
-                std::fill (olaR.end() - hop, olaR.end(), 0.0f);
+                synth.shift();
                 frameUpdate ((float) hop / fs);
                 synthFrame();
-                olaRead = 0;
             }
-            Stereo wet { olaL[(size_t) olaRead], olaR[(size_t) olaRead] };
-            ++olaRead;
+            Stereo wet = synth.next();
 
             if (clearState == 1)
             {
@@ -235,6 +251,7 @@ public:
             if (fxCurPos == FxLoop)
                 wet = mixFx (wet, mix);
             wet = wet * leveller (wet);
+            wetPeak = std::max (wetPeak, std::max (std::fabs (wet.l), std::fabs (wet.r)));
 
             const Stereo drySrc = p.bypass ? raw : x;
             const float dg = dryGain.next (dryTarget);
@@ -252,6 +269,7 @@ public:
         }
 
         uiPeak.store (peak, std::memory_order_relaxed);
+        uiWet.store (wetPeak, std::memory_order_relaxed);
         uiInput.store (det.level(), std::memory_order_relaxed);
         uiDepth.store (down ? (latched ? 1.0f : p.pedal) : 0.0f, std::memory_order_relaxed);
         uiDown.store (down, std::memory_order_relaxed);
@@ -263,7 +281,7 @@ public:
 private:
     struct Layer
     {
-        std::vector<float> mag;
+        Voice v;
         int state = LOff;
         float L = 0.0f, startL = 0.0f, prog = 0.0f, cap = 1.0f, age = 0.0f, pan = 0.0f;
         float fadeFrom = 0.0f, fadeTime = 0.05f, seed = 0.0f;
@@ -272,7 +290,9 @@ private:
     };
 
     enum CaptureKind { CapNormal = 0, CapTemplate, CapRetrigger };
-    struct Pending { int64_t at = 0, start = 0; int kind = CapNormal; bool first = false; bool quiet = false; };
+    struct Pending { int64_t at = 0, start = 0; int kind = CapNormal; bool first = false; bool quiet = false; bool bass = false; };
+
+    Analyser& analyserFor (bool bass) { return bass ? anaBass : anaNormal; }
 
     // ---------------------------------------------------------------------------
     // Pedal: press, release, latch and double tap
@@ -338,12 +358,14 @@ private:
                 }
         }
 
+        const bool bass = curInput == InputBass;
+        const int span = analyserFor (bass).span();
         if (mode == ModeSostenuto)
-            schedule (clock, clock - n, CapTemplate, true, true);
+            schedule (clock, clock - span, CapTemplate, true, true);
         else if (cur.catchMode == CatchSingle)
-            schedule (clock, clock - n, CapNormal, true, true);
+            schedule (clock, clock - span, CapNormal, true, true);
         else if (det.sounding())
-            schedule (clock, clock - n, CapNormal, true, false); // let what's ringing now carry on
+            schedule (clock, clock - span, CapNormal, true, false); // let what's ringing now carry on
     }
 
     void onRelease()
@@ -371,23 +393,59 @@ private:
             }
     }
 
+    bool catchAllowed() const
+    {
+        if (mode == ModeNormal && cur.catchMode == CatchSingle) return false;
+        if (mode == ModeSostenuto && ! haveTemplate) return false;
+        return ! groupClosed;
+    }
+
     void onOnset (int skip)
     {
-        if (mode == ModeNormal && cur.catchMode == CatchSingle) return;
-        if (mode == ModeSostenuto && ! haveTemplate) return;
-        if (groupClosed) return;
-        const bool retrigger = mode == ModeSostenuto;
-        schedule (clock + skip + n, clock + skip, retrigger ? CapRetrigger : CapNormal, scheduledThisPress == 0, false);
+        if (! catchAllowed()) return;
+        const bool bass = curInput == InputBass;
+        const int span = analyserFor (bass).span();
+        // the window starts just after the attack, so it holds the note, not the pick
+        schedule (clock + skip + span, clock + skip, mode == ModeSostenuto ? CapRetrigger : CapNormal, scheduledThisPress == 0, false);
     }
 
     void schedule (int64_t at, int64_t start, int kind, bool first, bool quiet)
     {
         if (npend >= (int) pend.size()) return;
         if (start < 0) start = 0;
-        pend[(size_t) npend++] = { at, start, kind, first, quiet };
+        pend[(size_t) npend++] = { at, start, kind, first, quiet, curInput == InputBass };
         ++scheduledThisPress;
+        lastCatchSec = nowSec();
+        if (havePrev) { chgRef = chgPrev; haveRef = true; }
         const bool grouping = cur.catchMode == CatchGroup && cur.layers != kInfinite && kind != CapTemplate;
         if (grouping && scheduledThisPress >= cur.layers) groupClosed = true;
+    }
+
+    // Synths and pads change chord without an attack. Every 80 ms the synth input compares
+    // the sound now with what was last caught: a steady sound that has moved on is a new chord.
+    void listenForChange()
+    {
+        if (! det.sounding()) { havePrev = false; return; }
+        for (int i = 0; i < chgN; ++i)
+            chgBuf[(size_t) i] = { hist[(size_t) ((clock - chgN + i) & histMask)] * chgWin[(size_t) i], 0.0f };
+        chgFft.run (chgBuf.data(), false);
+        for (int k = 0; k < chgN / 2; ++k) chgNow[(size_t) k] = std::abs (chgBuf[(size_t) k]);
+
+        auto similar = [&] (const std::vector<float>& a, const std::vector<float>& b)
+        {
+            double ab = 0, aa = 0, bb = 0;
+            for (int k = 2; k < chgN / 2; ++k) { ab += (double) a[(size_t) k] * b[(size_t) k]; aa += (double) a[(size_t) k] * a[(size_t) k]; bb += (double) b[(size_t) k] * b[(size_t) k]; }
+            return (float) (ab / std::sqrt (aa * bb + 1.0e-30));
+        };
+        const bool steady = havePrev && similar (chgNow, chgPrev) > 0.9f;
+        const bool moved = ! haveRef || similar (chgNow, chgRef) < 0.72f;
+        chgPrev = chgNow;
+        havePrev = true;
+        if (steady && moved && down && clearState == 0 && ! cur.bypass && nowSec() - lastCatchSec > 0.25 && catchAllowed())
+        {
+            const int span = anaNormal.span();
+            schedule (clock, clock - span, mode == ModeSostenuto ? CapRetrigger : CapNormal, scheduledThisPress == 0, false);
+        }
     }
 
     // ---------------------------------------------------------------------------
@@ -399,51 +457,57 @@ private:
         for (int i = 1; i < npend; ++i) pend[(size_t) i - 1] = pend[(size_t) i];
         --npend;
 
-        double energy = 0.0;
-        for (int i = 0; i < n; ++i)
-        {
-            const float v = hist[(size_t) ((pc.start + i) & histMask)];
-            energy += (double) v * v;
-            work[(size_t) i] = { v * window[(size_t) i], 0.0f };
-        }
-        const float rms = (float) std::sqrt (energy / n);
-        if (rms < (pc.quiet ? 2.0e-6f : 2.5e-4f)) return; // nothing there to hold
+        auto& ana = analyserFor (pc.bass);
+        const float rms = ana.measure ([this] (int64_t i) { return hist[(size_t) (i & histMask)]; }, pc.start);
 
-        fft.run (work.data(), false);
-        const int lo = std::max (1, (int) (25.0f / binHz)), hi = std::min (half - 1, (int) (19000.0f / binHz));
-        double before = 0.0, after = 0.0;
-        for (int k = 0; k <= half; ++k)
-        {
-            const float m = (k >= lo && k <= hi) ? std::abs (work[(size_t) k]) : 0.0f;
-            before += (double) m * m;
-            capture[(size_t) k] = std::pow (m, 1.75f); // sharpen the partials so held notes stay pure
-            after += (double) capture[(size_t) k] * capture[(size_t) k];
-        }
-        if (after <= 0.0) return;
-        const float norm = (float) std::sqrt (before / after);
-        for (auto& m : capture) m *= norm;
+        // judged against how loud you've been playing, never a fixed level
+        const float floor = pc.quiet ? 2.0e-6f : std::max (2.0e-5f, det.playingLevel() * 0.05f);
+        if (rms < floor) return; // nothing there to hold
 
-        if (pc.kind == CapTemplate)
-        {
-            std::copy (capture.begin(), capture.end(), templ.begin());
-            haveTemplate = true;
-        }
-        else if (pc.kind == CapRetrigger)
+        if (pc.kind == CapRetrigger)
         {
             if (! haveTemplate || ! down) return;
-            // only what the new note shares with the held chord rings again
-            double shared = 0.0, total = 0.0;
-            for (int k = 0; k <= half; ++k)
-            {
-                const float m = std::sqrt (capture[(size_t) k] * templ[(size_t) k]) * 1.5f;
-                total += (double) capture[(size_t) k] * capture[(size_t) k];
-                capture[(size_t) k] = m;
-                shared += (double) m * m;
-            }
-            if (shared < 0.02 * total) return;
+            if (! sympathetic (ana)) return;
         }
-
+        else
+        {
+            if (! ana.build (scratch, rng, kNoise)) return;
+            if (pc.kind == CapTemplate)
+            {
+                templ.copyFrom (scratch);
+                haveTemplate = true;
+                if (! cur.bypass) addLayer (pc.first); // the held chord rings straight away
+                return;
+            }
+        }
         addLayer (pc.first);
+    }
+
+    // Sostenuto: only the held chord's partials that the new note shares ring again
+    bool sympathetic (const Analyser& ana)
+    {
+        float newTop = 0.0f;
+        for (float m : ana.magnitudes()) newTop = std::max (newTop, m);
+        const float gate = 4.0f * newTop / (float) ana.size() * 0.03f;
+        double shared = 0.0, total = 0.0;
+        scratch.np = 0;
+        const float toBin = (float) ana.size() / kTwoPi;
+        for (int i = 0; i < templ.np; ++i)
+        {
+            const auto& tp = templ.p[(size_t) i];
+            const float a = ana.ampAtBin (tp.omega * toBin);
+            total += (double) tp.amp * tp.amp;
+            if (a < gate) continue;
+            auto& p = scratch.p[(size_t) scratch.np++];
+            p = tp;
+            p.amp = std::sqrt (tp.amp * a) * 1.5f;
+            p.zL = std::polar (1.0f, kTwoPi * rng.uni());
+            p.zR = p.zL * std::polar (1.0f, 1.05f * rng.next());
+            p.resDir = 0;
+            shared += (double) p.amp * p.amp;
+        }
+        scratch.noiseBins = 0;
+        return scratch.np > 0 && shared > 0.02 * total;
     }
 
     int maxLayers() const { return cur.layers >= kInfinite ? kSlots : std::max (1, cur.layers); }
@@ -477,7 +541,7 @@ private:
             if (ghosts[(size_t) k].L < quietest) { quietest = ghosts[(size_t) k].L; g = k; }
         }
         auto& dst = ghosts[(size_t) g];
-        std::copy (src.mag.begin(), src.mag.end(), dst.mag.begin());
+        dst.v.copyFrom (src.v);
         dst.state = LFade;
         dst.L = dst.fadeFrom = src.L;
         dst.fadeTime = std::max (0.03f, time);
@@ -498,10 +562,23 @@ private:
         auto& B = ring[(size_t) b];
         const float wa = std::max (A.L, 0.05f), wb = std::max (B.L, 0.05f);
         const float out = std::max (wa, wb);
-        for (size_t k = 0; k < A.mag.size(); ++k)
+
+        // keep the strongest partials of both, at their levels relative to each other
+        for (int i = 0; i < A.v.np; ++i) A.v.p[(size_t) i].amp *= wa / out;
+        for (int i = 0; i < B.v.np; ++i)
         {
-            const float x = A.mag[k] * wa, y = B.mag[k] * wb;
-            A.mag[k] = std::sqrt (x * x + y * y) / out;
+            auto pb = B.v.p[(size_t) i];
+            pb.amp *= wb / out;
+            if (A.v.np < kMaxPartials) { A.v.p[(size_t) A.v.np++] = pb; continue; }
+            int weakest = 0;
+            for (int k = 1; k < A.v.np; ++k) if (A.v.p[(size_t) k].amp < A.v.p[(size_t) weakest].amp) weakest = k;
+            if (pb.amp > A.v.p[(size_t) weakest].amp) A.v.p[(size_t) weakest] = pb;
+        }
+        const int nb = std::min (A.v.noiseBins, B.v.noiseBins);
+        for (int k = 0; k < nb; ++k)
+        {
+            const float x = A.v.noise[(size_t) k] * wa, y = B.v.noise[(size_t) k] * wb;
+            A.v.noise[(size_t) k] = std::sqrt (x * x + y * y) / out;
         }
         A.L = std::max (A.L, B.L);
         A.cap = std::max (A.cap, B.cap);
@@ -538,7 +615,7 @@ private:
         }
 
         auto& ly = ring[(size_t) slot];
-        std::copy (capture.begin(), capture.end(), ly.mag.begin());
+        ly.v.copyFrom (scratch);
         ly.state = LRise;
         ly.L = ly.startL = 0.0f;
         ly.prog = 0.0f;
@@ -546,7 +623,7 @@ private:
         ly.age = 0.0f;
         ly.order = ++orderCounter;
         ly.seed = rng.uni();
-        ly.pan = 0.6f * std::sin ((float) ly.order * 2.39996f); // golden angle: layers spread out
+        ly.pan = 0.45f * std::sin ((float) ly.order * 2.39996f); // golden angle: layers spread out
         if (mode != ModeNormal) ly.holdable = false;
         else if (cur.holdMode == HoldAll) ly.holdable = true;
         else if (cur.holdMode == HoldNone) ly.holdable = false;
@@ -638,62 +715,90 @@ private:
     // ---------------------------------------------------------------------------
     // Resynthesis
     // ---------------------------------------------------------------------------
-    void addLayerPower (const Layer& l, float resUp, float resDown, bool filter, float fmin, float speed)
+    void renderLayer (Layer& l, int resDir, const float (&resW)[3], float resNorm, bool filter, float fmin, float speed)
     {
+        // equal-power place in the stereo field
         const float a = (l.pan + 1.0f) * (kPi * 0.25f);
         const float gl = std::cos (a) * 1.41421356f * l.L, gr = std::sin (a) * 1.41421356f * l.L;
-
-        // Dual resonator: upper or lower harmonic relations of the layer itself, gently drifting
-        float w[3] = { 0, 0, 0 };
-        float ratio[3] = { 1, 1, 1 };
-        const bool up = resUp > 0.001f, dn = resDown > 0.001f;
-        if (up || dn)
-        {
-            const float r = up ? resUp : resDown;
-            const float base[3] = { up ? 0.55f : 0.65f, up ? 0.40f : 0.45f, up ? 0.30f : 0.35f };
-            const float upR[3] = { 2.0f, 3.0f, 4.0f }, dnR[3] = { 0.5f, 1.0f / 3.0f, 0.25f };
-            for (int j = 0; j < 3; ++j)
-            {
-                const float amt = clampf (r * 2.0f - 0.6f * (float) j, 0.0f, 1.0f);
-                const float drift = 0.7f + 0.3f * std::sin (kTwoPi * (0.07f * (float) (j + 1) * resTime + l.seed) + (float) j);
-                w[j] = amt * base[j] * drift;
-                ratio[j] = up ? upR[j] : dnR[j];
-            }
-        }
-        const float resNorm = 1.0f / std::sqrt (1.0f + w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
         const float fc = fmin + (20000.0f - fmin) * std::exp (-l.age * speed);
-        const float invFc = 1.0f / fc;
+        const float invFcHz = 1.0f / fc;
+        const float hzPerRad = fs / kTwoPi;
+        const float ratios[2][3] = { { 2.0f, 3.0f, 4.0f }, { 0.5f, 1.0f / 3.0f, 0.25f } };
+        const float nyq = kPi * 0.92f;
 
-        for (int k = 1; k < half; ++k)
+        auto toneGain = [&] (float omega)
         {
-            float e = l.mag[(size_t) k];
-            if (w[0] > 0.0f)
+            if (! filter) return 1.0f;
+            const float x = omega * hzPerRad * invFcHz;
+            return 1.0f / std::sqrt (1.0f + x * x * x * x);
+        };
+
+        for (int i = 0; i < l.v.np; ++i)
+        {
+            auto& p = l.v.p[(size_t) i];
+            p.wobPh += p.wobStep;
+            if (p.wobPh > kTwoPi) p.wobPh -= kTwoPi;
+            const float s = std::sin (p.wobPh);
+            const float wl = 1.0f + 0.045f * s, wr = 1.0f + 0.045f * std::sin (p.wobPh + 1.9f);
+            const float base = p.amp * toneGain (p.omega) * resNorm;
+            synth.addSine (p.omega, p.zL * (base * gl * wl), p.zR * (base * gr * wr));
+
+            if (resDir != 0)
             {
+                if (p.resDir != resDir)
+                {
+                    // set up this partial's resonators at the new ratios
+                    const auto& rr = ratios[resDir > 0 ? 0 : 1];
+                    for (int j = 0; j < 3; ++j)
+                    {
+                        const float ph = kTwoPi * rng.uni();
+                        p.resL[(size_t) j] = std::polar (1.0f, ph);
+                        p.resR[(size_t) j] = std::polar (1.0f, ph + 1.05f * rng.next());
+                        p.resRot[(size_t) j] = std::polar (1.0f, p.omega * rr[j] * (float) hop);
+                    }
+                    p.resDir = resDir;
+                }
+                const auto& rr = ratios[resDir > 0 ? 0 : 1];
                 for (int j = 0; j < 3; ++j)
                 {
-                    if (w[j] <= 0.0f) continue;
-                    const float src = (float) k / ratio[j];
-                    const int i0 = (int) src;
-                    if (i0 + 1 >= half) continue;
-                    const float fr = src - (float) i0;
-                    e += w[j] * lerpf (l.mag[(size_t) i0], l.mag[(size_t) i0 + 1], fr);
+                    if (resW[j] <= 0.0f) continue;
+                    const float om = p.omega * rr[j];
+                    if (om > nyq || om * hzPerRad < 22.0f) continue;
+                    const float ra = p.amp * resW[j] * toneGain (om) * resNorm;
+                    synth.addSine (om, p.resL[(size_t) j] * (ra * gl), p.resR[(size_t) j] * (ra * gr));
+                    p.resL[(size_t) j] *= p.resRot[(size_t) j];
+                    p.resR[(size_t) j] *= p.resRot[(size_t) j];
                 }
-                e *= resNorm;
             }
-            if (filter)
+
+            // turn the phases on to the next frame, and keep them on the unit circle
+            p.zL *= p.rot;
+            p.zR *= p.rot;
+            p.zL *= 1.5f - 0.5f * std::norm (p.zL);
+            p.zR *= 1.5f - 0.5f * std::norm (p.zR);
+        }
+
+        // breath and body
+        if (l.v.noiseBins > 0 && l.v.noiseScale > 0.0f)
+        {
+            const float binHz = synth.binHz();
+            const int last = synth.size() / 2 - 1;
+            const float pl = gl * gl, pr = gr * gr;
+            for (int k = 1; k < last; ++k)
             {
-                const float x = (float) k * binHz * invFc;
-                e /= std::sqrt (1.0f + x * x * x * x);
+                const float hz = (float) k * binHz;
+                float m = l.v.noiseAt (hz) * l.v.noiseScale;
+                if (m <= 0.0f) continue;
+                if (filter) { const float x = hz * invFcHz; m /= std::sqrt (1.0f + x * x * x * x); }
+                const float pw = m * m * resNorm * resNorm;
+                synth.addNoisePower (k, pw * pl, pw * pr);
             }
-            powL[(size_t) k] += e * e * gl * gl;
-            powR[(size_t) k] += e * e * gr * gr;
         }
     }
 
     void synthFrame()
     {
-        std::fill (powL.begin(), powL.end(), 0.0f);
-        std::fill (powR.begin(), powR.end(), 0.0f);
+        synth.beginFrame();
 
         // TONE: each layer darkens as it ages; the piano modes always darken fully
         const float toneEff = mode == ModeNormal ? cur.tone : 0.0f;
@@ -701,39 +806,30 @@ private:
         const float dark = 1.0f - toneEff;
         const float fmin = 20000.0f * std::pow (250.0f / 20000.0f, dark);
         const float speed = 0.25f + 2.0f * dark;
+
+        // Dual resonance: upper or lower harmonic relations of the layer itself, gently drifting
         const float res = clampf (cur.resonance, -1.0f, 1.0f);
-        const float resUp = std::max (0.0f, res), resDown = std::max (0.0f, -res);
-
-        bool any = false;
-        for (const auto* set : { &ring, &ghosts })
-            for (const auto& l : *set)
-                if (l.state != LOff && l.L > 1.0e-5f)
-                {
-                    addLayerPower (l, resUp, resDown, filter, fmin, speed);
-                    any = true;
-                }
-        if (! any) return;
-
-        // stereo: left and right get related but not identical phases
-        constexpr float kGain = 0.943f; // random-phase overlap-add at 8x overlap
-        for (int side = 0; side < 2; ++side)
+        const int resDir = res > 0.01f ? 1 : (res < -0.01f ? -1 : 0);
+        float resW[3] = { 0, 0, 0 };
+        if (resDir != 0)
         {
-            const auto& pw = side == 0 ? powL : powR;
-            work[0] = {};
-            work[(size_t) half] = {};
-            for (int k = 1; k < half; ++k)
+            const float r = std::fabs (res);
+            const float base[3] = { resDir > 0 ? 0.55f : 0.65f, resDir > 0 ? 0.40f : 0.45f, resDir > 0 ? 0.30f : 0.35f };
+            for (int j = 0; j < 3; ++j)
             {
-                const float ph = side == 0 ? kPi * rng.next() : phaseL[(size_t) k] + 0.55f * kPi * rng.next();
-                if (side == 0) phaseL[(size_t) k] = ph;
-                const auto c = std::polar (std::sqrt (pw[(size_t) k]) * kGain, ph);
-                work[(size_t) k] = c;
-                work[(size_t) (n - k)] = std::conj (c);
+                const float amt = clampf (r * 2.0f - 0.6f * (float) j, 0.0f, 1.0f);
+                const float drift = 0.75f + 0.25f * std::sin (kTwoPi * 0.06f * (float) (j + 1) * resTime + (float) j);
+                resW[j] = amt * base[j] * drift;
             }
-            fft.run (work.data(), true);
-            auto& ola = side == 0 ? olaL : olaR;
-            for (int i = 0; i < n; ++i)
-                ola[(size_t) i] += work[(size_t) i].real() * window[(size_t) i];
         }
+        const float resNorm = 1.0f / std::sqrt (1.0f + resW[0] * resW[0] + resW[1] * resW[1] + resW[2] * resW[2]);
+
+        for (auto* set : { &ring, &ghosts })
+            for (auto& l : *set)
+                if (l.state != LOff && l.L > 1.0e-5f)
+                    renderLayer (l, resDir, resW, resNorm, filter, fmin, speed);
+
+        synth.endFrame (rng);
     }
 
     // Stacked layers add up. A soft-knee leveller on the layers keeps a wall of ten
@@ -742,7 +838,7 @@ private:
     {
         const float pw = 0.5f * (w.l * w.l + w.r * w.r);
         compEnv += (pw - compEnv) * (pw > compEnv ? compAtt : compRel);
-        const float over = 10.0f * std::log10 (compEnv + 1.0e-12f) + 12.0f; // threshold -12 dBFS RMS
+        const float over = 10.0f * std::log10 (compEnv + 1.0e-12f) + 9.0f; // threshold -9 dBFS RMS
         constexpr float slope = 1.0f - 1.0f / 3.0f;                          // 3:1
         float gainDb = 0.0f;
         if (over > 3.0f) gainDb = -slope * over;
@@ -770,27 +866,31 @@ private:
     {
         for (auto& l : ring) { l.state = LOff; l.L = 0.0f; }
         for (auto& l : ghosts) { l.state = LOff; l.L = 0.0f; }
-        std::fill (olaL.begin(), olaL.end(), 0.0f);
-        std::fill (olaR.begin(), olaR.end(), 0.0f);
+        synth.clear();
         npend = 0;
     }
 
+    static constexpr float kNoise = 0.5f; // breath and body sit 6 dB under the note's own
+
     // ---- state ----
-    float fs = 48000.0f, binHz = 11.7f;
-    int n = 4096, hop = 512, half = 2048;
-    Fft fft;
-    std::vector<float> window;
+    float fs = 48000.0f;
+    int hop = 512;
+    Analyser anaNormal, anaBass;
+    Synth synth;
     std::vector<float> hist;
     int64_t histMask = 0, clock = 0;
     Detector det;
     FxSlot fx;
 
     std::array<Layer, kSlots> ring, ghosts;
-    std::vector<float> capture, templ, powL, powR;
-    std::array<float, 8193> phaseL {};
-    std::vector<std::complex<float>> work;
-    std::vector<float> olaL, olaR;
-    int olaRead = 0;
+    Voice scratch, templ;
+
+    // synth input chord-change listener
+    Fft chgFft;
+    int chgN = 1024, chgEvery = 4000, chgCount = 0;
+    std::vector<float> chgWin, chgNow, chgPrev, chgRef;
+    std::vector<cfloat> chgBuf;
+    bool haveRef = false, havePrev = false;
 
     std::array<Pending, 12> pend;
     int npend = 0, scheduledThisPress = 0;
@@ -799,9 +899,10 @@ private:
 
     EngineParams cur;
     EngineMode mode = ModeNormal;
+    int curInput = InputGuitar;
     bool physDown = false, latched = false, down = false, groupClosed = false, haveTemplate = false;
     float depth = 0.0f, depthSm = 0.0f, resTime = 0.0f;
-    double pressStartSec = 0.0, lastReleaseSec = -10.0, lastPressDur = 10.0;
+    double pressStartSec = 0.0, lastReleaseSec = -10.0, lastPressDur = 10.0, lastCatchSec = -10.0;
 
     std::atomic<bool> clearRequest { false };
     int clearState = 0;

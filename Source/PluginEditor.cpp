@@ -45,6 +45,24 @@ static Colour modeColour (int mode)
     return ff::ink;
 }
 
+static void pill (Graphics& g, Rectangle<float> b, const String& text, bool on, float size, Colour onColour = ff::ink)
+{
+    const float r = b.getHeight() * 0.5f;
+    if (on)
+    {
+        g.setColour (onColour);
+        g.fillRoundedRectangle (b, r);
+    }
+    else
+    {
+        g.setColour (ff::line);
+        g.drawRoundedRectangle (b.reduced (1.0f), r, 2.0f);
+    }
+    g.setColour (on ? ff::bg : ff::ink);
+    g.setFont (ff::font (size, 0.06f));
+    g.drawText (text, b, Justification::centred, false);
+}
+
 // =====================================================================================
 // FlipCard
 // =====================================================================================
@@ -83,7 +101,7 @@ void FlipCard::drawHalf (Graphics& g, Rectangle<float> card, const String& text,
     g.fillRoundedRectangle (card, 7.0f);
     g.setColour (ff::ink);
     g.setFont (ff::font (textHeight, 0.02f));
-    g.drawText (text, card, Justification::centred, false);
+    g.drawFittedText (text, card.reduced (6.0f, 0.0f).toNearestInt(), Justification::centred, 1, 0.7f);
 
     if (shade)
     {
@@ -123,26 +141,8 @@ void FlipCard::paint (Graphics& g)
 // =====================================================================================
 // Pills and chips
 // =====================================================================================
-static void drawPill (Graphics& g, Rectangle<float> b, const String& text, bool on, float textSize)
-{
-    const float r = b.getHeight() * 0.5f;
-    if (on)
-    {
-        g.setColour (ff::ink);
-        g.fillRoundedRectangle (b, r);
-    }
-    else
-    {
-        g.setColour (ff::line);
-        g.drawRoundedRectangle (b.reduced (1.0f), r, 2.0f);
-    }
-    g.setColour (on ? ff::bg : ff::ink);
-    g.setFont (ff::font (textSize, 0.06f));
-    g.drawText (text, b, Justification::centred, false);
-}
-
-Pills::Pills (AudioProcessorValueTreeState& s, const String& paramId, StringArray l, float size, int cols)
-    : labels (std::move (l)), columns (cols), textSize (size)
+Pills::Pills (AudioProcessorValueTreeState& s, const String& paramId, StringArray l, float size)
+    : labels (std::move (l)), textSize (size)
 {
     setMouseCursor (MouseCursor::PointingHandCursor);
     attachment = std::make_unique<ParameterAttachment> (*s.getParameter (paramId), [this] (float v)
@@ -155,18 +155,15 @@ Pills::Pills (AudioProcessorValueTreeState& s, const String& paramId, StringArra
 
 Rectangle<float> Pills::cell (int i) const
 {
-    const float gap = 8.0f;
-    const int cols = columns > 0 ? columns : labels.size();
-    const int rows = (labels.size() + cols - 1) / cols;
-    const float w = ((float) getWidth() - gap * (float) (cols - 1)) / (float) cols;
-    const float h = ((float) getHeight() - gap * (float) (rows - 1)) / (float) rows;
-    return { (float) (i % cols) * (w + gap), (float) (i / cols) * (h + gap), w, h };
+    const float gap = 6.0f;
+    const float w = ((float) getWidth() - gap * (float) (labels.size() - 1)) / (float) labels.size();
+    return { (float) i * (w + gap), 0.0f, w, (float) getHeight() };
 }
 
 void Pills::paint (Graphics& g)
 {
     for (int i = 0; i < labels.size(); ++i)
-        drawPill (g, cell (i).reduced (1.0f), labels[i], i == selected, textSize);
+        pill (g, cell (i).reduced (1.0f), labels[i], i == selected, textSize);
 }
 
 void Pills::mouseDown (const MouseEvent& e)
@@ -179,8 +176,8 @@ void Pills::mouseDown (const MouseEvent& e)
         }
 }
 
-ToggleChip::ToggleChip (AudioProcessorValueTreeState& s, const String& paramId, const String& t, float size)
-    : text (t), textSize (size)
+ToggleChip::ToggleChip (AudioProcessorValueTreeState& s, const String& paramId, const String& t, const String& tOn, bool fillOn, float size)
+    : text (t), onText (tOn.isEmpty() ? t : tOn), fill (fillOn), textSize (size)
 {
     setMouseCursor (MouseCursor::PointingHandCursor);
     attachment = std::make_unique<ParameterAttachment> (*s.getParameter (paramId), [this] (float v) { on = v > 0.5f; repaint(); });
@@ -189,7 +186,7 @@ ToggleChip::ToggleChip (AudioProcessorValueTreeState& s, const String& paramId, 
 
 void ToggleChip::paint (Graphics& g)
 {
-    drawPill (g, getLocalBounds().toFloat().reduced (1.0f), text, on, textSize);
+    pill (g, getLocalBounds().toFloat().reduced (1.0f), on ? onText : text, on && fill, textSize);
 }
 
 void ToggleChip::mouseDown (const MouseEvent&)
@@ -197,64 +194,10 @@ void ToggleChip::mouseDown (const MouseEvent&)
     attachment->setValueAsCompleteGesture (on ? 0.0f : 1.0f);
 }
 
-FootswitchPills::FootswitchPills (AudioProcessorValueTreeState& s) : state (s)
-{
-    setMouseCursor (MouseCursor::PointingHandCursor);
-    modeAttachment = std::make_unique<ParameterAttachment> (*s.getParameter (ParamIDs::fsMode), [this] (float v) { mode = (int) std::lround (v); repaint(); });
-    onAttachment = std::make_unique<ParameterAttachment> (*s.getParameter (ParamIDs::fsOn), [this] (float v) { on = v > 0.5f; repaint(); });
-    modeAttachment->sendInitialUpdate();
-    onAttachment->sendInitialUpdate();
-}
-
-Rectangle<float> FootswitchPills::cell (int i) const
-{
-    const float gap = 8.0f;
-    const float w = ((float) getWidth() - gap * 2.0f) / 3.0f;
-    return { (float) i * (w + gap), 0.0f, w, (float) getHeight() };
-}
-
-void FootswitchPills::paint (Graphics& g)
-{
-    static const char* names[3] = { "WET", "LATCH", "HIDE" };
-    for (int i = 0; i < 3; ++i)
-    {
-        auto b = cell (i).reduced (1.0f);
-        const bool sel = i == mode;
-        drawPill (g, b, names[i], sel && on, 14.0f);
-        if (sel && ! on)
-        {
-            // chosen but not engaged: brighter ring and a dark LED
-            g.setColour (ff::ink);
-            g.drawRoundedRectangle (b.reduced (1.0f), b.getHeight() * 0.5f, 2.0f);
-            g.setColour (ff::pin);
-            g.fillEllipse (b.getX() + 10.0f, b.getCentreY() - 3.0f, 6.0f, 6.0f);
-        }
-        else if (sel)
-        {
-            g.setColour (ff::red);
-            g.fillEllipse (b.getX() + 10.0f, b.getCentreY() - 3.0f, 6.0f, 6.0f);
-        }
-    }
-}
-
-void FootswitchPills::mouseDown (const MouseEvent& e)
-{
-    for (int i = 0; i < 3; ++i)
-        if (cell (i).contains (e.position))
-        {
-            if (i == mode)
-                onAttachment->setValueAsCompleteGesture (on ? 0.0f : 1.0f);
-            else
-            {
-                modeAttachment->setValueAsCompleteGesture ((float) i);
-                onAttachment->setValueAsCompleteGesture (1.0f);
-            }
-            return;
-        }
-}
+void ActionChip::paint (Graphics& g) { pill (g, getLocalBounds().toFloat().reduced (1.0f), text, lit, size); }
 
 // =====================================================================================
-// Look and feel
+// Look and feel and dials
 // =====================================================================================
 void FlipLookAndFeel::drawRotarySlider (Graphics& g, int x, int y, int w, int h, float pos, float start, float end, Slider& s)
 {
@@ -287,34 +230,15 @@ void FlipLookAndFeel::drawRotarySlider (Graphics& g, int x, int y, int w, int h,
     g.fillEllipse (c.x - 1.8f, c.y - 1.8f, 3.6f, 3.6f);
 }
 
-void FlipLookAndFeel::drawButtonBackground (Graphics& g, Button& b, const Colour&, bool highlighted, bool down)
-{
-    auto r = b.getLocalBounds().toFloat().reduced (1.0f);
-    const float rad = r.getHeight() * 0.5f;
-    g.setColour (down ? ff::card : ff::face);
-    g.fillRoundedRectangle (r, rad);
-    g.setColour (highlighted || down ? ff::ink : ff::line);
-    g.drawRoundedRectangle (r.reduced (1.0f), rad, 2.0f);
-}
-
-void FlipLookAndFeel::drawButtonText (Graphics& g, TextButton& b, bool, bool)
-{
-    g.setColour (ff::ink);
-    g.setFont (ff::font (14.0f, 0.08f));
-    g.drawText (b.getButtonText(), b.getLocalBounds(), Justification::centred, false);
-}
-
-// =====================================================================================
-// Dial
-// =====================================================================================
-Dial::Dial (AudioProcessorValueTreeState& s, const String& paramId, const String& c, bool redHand) : caption (c), red (redHand)
+Dial::Dial (AudioProcessorValueTreeState& s, const String& paramId, const String& c, bool redHand, bool sec)
+    : caption (c), secondary (sec)
 {
     param = s.getParameter (paramId);
     slider.setSliderStyle (Slider::RotaryHorizontalVerticalDrag);
     slider.setTextBoxStyle (Slider::NoTextBox, false, 0, 0);
     slider.setRotaryParameters (MathConstants<float>::pi * 1.25f, MathConstants<float>::pi * 2.75f, true);
     slider.setMouseCursor (MouseCursor::PointingHandCursor);
-    slider.getProperties().set ("red", red);
+    slider.getProperties().set ("red", redHand);
     slider.getProperties().set ("bipolar", paramId == ParamIDs::resonance);
     slider.setDoubleClickReturnValue (true, (double) param->convertFrom0to1 (param->getDefaultValue()));
     addAndMakeVisible (slider);
@@ -330,7 +254,7 @@ void Dial::resized()
 void Dial::paint (Graphics& g)
 {
     auto r = getLocalBounds();
-    ff::label (g, caption.toUpperCase(), r.removeFromTop (18), Justification::centred);
+    ff::label (g, caption.toUpperCase(), r.removeFromTop (18), Justification::centred, secondary ? ff::faint.brighter (0.4f) : ff::dim);
     ff::label (g, param->getCurrentValueAsText().toUpperCase(), r.removeFromBottom (20), Justification::centred, ff::ink, 15.0f);
 }
 
@@ -346,8 +270,8 @@ LayersDial::LayersDial (AfterglowProcessor& p) : proc (p)
     setMouseCursor (MouseCursor::PointingHandCursor);
 }
 
-Point<float> LayersDial::centre() const { return { getWidth() * 0.5f, getHeight() * 152.0f / 290.0f }; }
-float LayersDial::scale() const { return jmin ((float) getWidth() / 316.0f, (float) getHeight() / 290.0f); }
+Point<float> LayersDial::centre() const { return { getWidth() * 0.5f, getHeight() * 150.0f / 268.0f }; }
+float LayersDial::scale() const { return jmin ((float) getWidth() / 330.0f, (float) getHeight() / 268.0f); }
 int LayersDial::currentStop() const { return jlimit (0, 10, roundToInt (plainOf (param))); }
 
 void LayersDial::paint (Graphics& g)
@@ -400,7 +324,7 @@ void LayersDial::paint (Graphics& g)
         const bool inUse = i < slots || (i == 10 && stop == 10);
         const Colour base = inUse ? ff::faint : ff::line.darker (0.4f);
         const bool heldSlot = i < 10 && eng.uiState[i].load() == 2;
-        g.setColour (base.interpolatedWith (heldSlot && mode == ag::ModeNormal ? ff::ink : led, lvl));
+        g.setColour (base.interpolatedWith (heldSlot && mode == ag::ModeNormal ? ff::brass : led, lvl));
         g.drawLine (Line<float> (at (deg, 90), at (deg, 102)), (4.0f + 2.0f * lvl) * s);
 
         const auto lp = at (deg, 74);
@@ -431,7 +355,7 @@ int LayersDial::stopAt (Point<float> p) const
 
 void LayersDial::pick (int stop)
 {
-    if (stop < 0) return;
+    if (stop < 0 || stop == currentStop()) return;
     setParam (param, (float) stop);
     repaint();
 }
@@ -444,9 +368,8 @@ void LayersDial::mouseDown (const MouseEvent& e)
 
 void LayersDial::mouseDrag (const MouseEvent& e)
 {
-    const int stop = jlimit (0, 10, roundToInt (dragStart - (float) e.getDistanceFromDragStartY() / 20.0f));
-    if (std::abs (e.getDistanceFromDragStartY()) > 6 && stop != currentStop())
-        pick (stop);
+    if (std::abs (e.getDistanceFromDragStartY()) > 6)
+        pick (jlimit (0, 10, roundToInt (dragStart - (float) e.getDistanceFromDragStartY() / 20.0f)));
 }
 
 void LayersDial::mouseWheelMove (const MouseEvent&, const MouseWheelDetails& w)
@@ -455,7 +378,7 @@ void LayersDial::mouseWheelMove (const MouseEvent&, const MouseWheelDetails& w)
 }
 
 // =====================================================================================
-// Layer lanes and piano box
+// Layer lanes
 // =====================================================================================
 void LayerLanes::paint (Graphics& g)
 {
@@ -481,47 +404,28 @@ void LayerLanes::paint (Graphics& g)
         const float h = jmax (4.0f, lvl * inner.getHeight());
         Rectangle<float> bar (inner.getX() + (float) i * (w + gap), inner.getBottom() - h, w, h);
         Colour col = i < slots ? ff::line : ff::line.darker (0.6f);
-        if (st == 2) col = mode == ag::ModeNormal ? ff::red : modeColour (mode);
+        if (st == 2) col = mode == ag::ModeNormal ? ff::brass : modeColour (mode);
         else if (st == 1) col = ff::ink;
         else if (st == 3) col = ff::dim;
         g.setColour (col);
         g.fillRoundedRectangle (bar, 3.0f);
     }
 
-    const int hold = (int) std::lround (proc.apvts.getRawParameterValue (ParamIDs::holdMode)->load());
-    static const char* meanings[3] = { "EVERY LAYER RISES THEN FADES", "FIRST HELD, OTHERS RISE THEN FADE", "ALL HELD WHILE THE PEDAL IS DOWN" };
-    ff::label (g, mode != ag::ModeNormal ? String ("DAMPERS FALL WHEN YOU LIFT") : String (meanings[jlimit (0, 2, hold)]),
-               caption, Justification::centred, ff::faint, 12.0f);
-}
-
-void PianoBox::paint (Graphics& g)
-{
-    auto b = getLocalBounds().toFloat().reduced (1.0f);
-    const int mode = proc.getEngine().uiMode.load();
-    const bool active = mode != ag::ModeNormal;
-    g.setColour (ff::housing);
-    g.fillRoundedRectangle (b, 10.0f);
-    g.setColour (active ? modeColour (mode) : ff::line);
-    g.drawRoundedRectangle (b.reduced (1.0f), 10.0f, 2.0f);
-
-    auto r = b.reduced (14.0f, 10.0f).toNearestInt();
-    static const char* names[4] = { "PIANO MODES", "REAL PIANO", "PIANO GROUP", "PIANO SOSTENUTO" };
-    ff::label (g, names[jlimit (0, 3, mode)], r.removeFromTop (24), Justification::centredLeft, active ? modeColour (mode) : ff::ink, 18.0f);
-    if (active)
+    // a key for the colours
+    struct Key { const char* t; Colour c; };
+    const Key keys[3] = { { "RISING", ff::ink }, { "HELD", ff::brass }, { "FADING", ff::dim } };
+    int x = caption.getX();
+    for (const auto& k : keys)
     {
-        static const char* what[4] = { "", "NEW NOTES RING, LIFT TO DAMP", "A SET NUMBER OF NOTES RING", "HOLDS A CHORD THAT RINGS AGAIN" };
-        ff::label (g, what[mode], r.removeFromTop (20), Justification::centredLeft, ff::dim, 13.0f);
-        ff::label (g, "TONE SETS THE DAMPER SPEED", r.removeFromTop (20), Justification::centredLeft, ff::faint, 12.0f);
-    }
-    else
-    {
-        ff::label (g, "HOLD NONE + TONE FULLY DOWN", r.removeFromTop (20), Justification::centredLeft, ff::dim, 13.0f);
-        ff::label (g, "CATCH PICKS REAL, GROUP OR SOSTENUTO", r.removeFromTop (20), Justification::centredLeft, ff::faint, 12.0f);
+        g.setColour (k.c);
+        g.fillRoundedRectangle ((float) x, (float) caption.getCentreY() - 4.0f, 8.0f, 8.0f, 2.0f);
+        ff::label (g, k.t, { x + 12, caption.getY(), 60, caption.getHeight() }, Justification::centredLeft, ff::faint.brighter (0.4f), 11.0f);
+        x += 72;
     }
 }
 
 // =====================================================================================
-// Brass pedal, learn, presets, bypass
+// Brass pedal and bypass
 // =====================================================================================
 BrassPedal::BrassPedal (AfterglowProcessor& p) : proc (p)
 {
@@ -534,8 +438,9 @@ void BrassPedal::set (float v)
     param->setValueNotifyingHost (param->convertTo0to1 (jlimit (0.0f, 1.0f, v)));
 }
 
-void BrassPedal::mouseDown (const MouseEvent&)
+void BrassPedal::mouseDown (const MouseEvent& e)
 {
+    if (e.mods.isPopupMenu()) { menu(); return; }
     held = true;
     param->beginChangeGesture();
     set (1.0f);
@@ -545,15 +450,33 @@ void BrassPedal::mouseDown (const MouseEvent&)
 void BrassPedal::mouseDrag (const MouseEvent& e)
 {
     // drag up to ease your foot off, back down to press in again
-    set (1.0f + (float) jmin (0, e.getDistanceFromDragStartY()) / 150.0f);
+    if (held) set (1.0f + (float) jmin (0, e.getDistanceFromDragStartY()) / 120.0f);
 }
 
 void BrassPedal::mouseUp (const MouseEvent&)
 {
+    if (! held) return;
     held = false;
     set (0.0f);
     param->endChangeGesture();
     repaint();
+}
+
+void BrassPedal::menu()
+{
+    const bool sustain = proc.apvts.getRawParameterValue (ParamIDs::sustainCC)->load() > 0.5f;
+    PopupMenu m;
+    m.addSectionHeader ("Brass Pedal");
+    m.addItem (-1, "Played by: " + proc.pedalSources(), false, false);
+    m.addItem (1, "Keyboard sustain pedal plays it", true, sustain);
+    m.addItem (2, "Learn a key or touch strip");
+    m.addItem (3, "Forget the learned key or strip");
+    m.showMenuAsync (PopupMenu::Options().withTargetComponent (this), [this, sustain] (int r)
+    {
+        if (r == 1) setParam (proc.apvts.getParameter (ParamIDs::sustainCC), sustain ? 0.0f : 1.0f);
+        else if (r == 2) proc.learnPedal();
+        else if (r == 3) proc.forgetPedal();
+    });
 }
 
 void BrassPedal::paint (Graphics& g)
@@ -563,176 +486,351 @@ void BrassPedal::paint (Graphics& g)
     const bool latched = eng.uiLatched.load();
     const bool down = eng.uiDown.load();
     const float depth = jlimit (0.0f, 1.0f, eng.uiDepth.load());
+    const bool learning = proc.learningWhat() == AfterglowProcessor::LearnPedal;
 
     g.setColour (held ? ff::card : ff::housing);
     g.fillRoundedRectangle (r, 12.0f);
-    g.setColour (down ? ff::brass : ff::line);
+    g.setColour (down || learning ? ff::brass : ff::line);
     g.drawRoundedRectangle (r.reduced (1.0f), 12.0f, 2.0f);
 
-    auto inner = r.reduced (16.0f, 9.0f);
-    auto top = inner.removeFromTop (20.0f).toNearestInt();
-    ff::label (g, "BRASS PEDAL", top, Justification::centredLeft, ff::ink, 17.0f);
-    ff::label (g, latched ? String ("LATCHED") : String (roundToInt (depth * 100.0f)) + "%", top, Justification::centredRight, down ? ff::brass : ff::dim, 17.0f);
+    auto inner = r.reduced (14.0f, 9.0f);
+    auto top = inner.removeFromTop (22.0f).toNearestInt();
+    ff::label (g, learning ? String ("PLAY A KEY") : String ("BRASS PEDAL"), top, Justification::centredLeft, ff::ink, 19.0f);
+    ff::label (g, latched ? String ("LATCHED") : (depth > 0.0f ? String (roundToInt (depth * 100.0f)) + "%" : String ("A")),
+               top, Justification::centredRight, down ? ff::brass : ff::faint.brighter (0.3f), latched || depth > 0.0f ? 15.0f : 13.0f);
 
     inner.removeFromTop (6.0f);
-    auto track = inner.removeFromTop (12.0f);
-    g.setColour (ff::line);
-    g.fillRoundedRectangle (track, 6.0f);
+    auto track = inner.removeFromTop (10.0f);
+    g.setColour (ff::ring);
+    g.fillRoundedRectangle (track, 5.0f);
     if (depth > 0.0f)
     {
         g.setColour (ff::brass);
-        g.fillRoundedRectangle (track.withWidth (jmax (12.0f, track.getWidth() * depth)), 6.0f);
+        g.fillRoundedRectangle (track.withWidth (jmax (10.0f, track.getWidth() * depth)), 5.0f);
     }
 
-    inner.removeFromTop (5.0f);
-    ff::label (g, "CLICK AND HOLD" + dot + "DRAG UP TO EASE OFF" + dot + "DOUBLE TAP CLEARS" + dot + proc.pedalSources(),
-               inner.toNearestInt(), Justification::centredLeft, ff::faint, 11.0f);
+    inner.removeFromTop (4.0f);
+    ff::label (g, down ? String ("LAYERS CATCH WHAT YOU PLAY") : String ("CLICK AND HOLD TO SUSTAIN"),
+               inner.toNearestInt(), Justification::centredLeft, ff::dim, 11.0f);
 }
 
-void LearnButton::paint (Graphics& g)
-{
-    auto b = getLocalBounds().toFloat().reduced (1.0f);
-    const float r = b.getHeight() * 0.5f;
-    const int st = proc.learnState();
-    const String text = st == 1 ? "LISTENING" : (st == 2 ? "LEARNED" : "LEARN");
-    g.setColour (st == 1 ? ff::ink : ff::line);
-    g.drawRoundedRectangle (b.reduced (1.0f), r, 2.0f);
-    const float pulse = st == 1 ? 0.4f + 0.6f * (float) std::abs (std::sin (nowSeconds() * 5.0)) : 1.0f;
-    g.setColour (ff::red.withAlpha (pulse));
-    const float tw = GlyphArrangement::getStringWidth (ff::font (14.0f, 0.08f), text);
-    g.fillEllipse (b.getCentreX() - tw * 0.5f - 10.0f, b.getCentreY() - 4.0f, 8.0f, 8.0f);
-    g.setColour (ff::ink);
-    g.setFont (ff::font (14.0f, 0.08f));
-    g.drawText (text, b.withTrimmedLeft (12.0f), Justification::centred, false);
-}
-
-PresetToggle::PresetToggle (AfterglowProcessor& p) : proc (p)
+BypassSwitch::BypassSwitch (AfterglowProcessor& p)
 {
     setMouseCursor (MouseCursor::PointingHandCursor);
+    attachment = std::make_unique<ParameterAttachment> (*p.apvts.getParameter (ParamIDs::bypass), [this] (float v) { on = v > 0.5f; repaint(); });
+    attachment->sendInitialUpdate();
 }
 
-Rectangle<float> PresetToggle::cell (int i) const
-{
-    const float w[3] = { 40.0f, 52.0f, 40.0f };
-    float x = 0;
-    for (int k = 0; k < i; ++k) x += w[k] + 4.0f;
-    return { x, 0.0f, w[i], (float) getHeight() - 8.0f };
-}
+void BypassSwitch::mouseDown (const MouseEvent&) { attachment->setValueAsCompleteGesture (on ? 0.0f : 1.0f); }
 
-void PresetToggle::paint (Graphics& g)
+void BypassSwitch::paint (Graphics& g)
 {
-    const int sel = (int) std::lround (proc.apvts.getRawParameterValue (ParamIDs::presetSlot)->load());
-    static const char* labels[3] = { "A", "LIVE", "B" };
-    for (int i = 0; i < 3; ++i)
+    auto r = getLocalBounds().toFloat().reduced (1.0f);
+    const bool lit = ! on;
+    g.setColour (ff::housing);
+    g.fillRoundedRectangle (r, 12.0f);
+    g.setColour (lit ? ff::ink : ff::line);
+    g.drawRoundedRectangle (r.reduced (1.0f), 12.0f, 2.0f);
+
+    const Point<float> p (r.getX() + 22.0f, r.getCentreY());
+    if (lit)
     {
-        auto b = cell (i);
-        const bool on = i == sel;
-        const bool flash = i == savedCell && nowSeconds() < savedFlashUntil;
-        g.setColour (flash ? ff::red : (on ? ff::ink : ff::card));
-        g.fillRoundedRectangle (b, 6.0f);
-        g.setColour (Colours::black.withAlpha (on ? 0.3f : 0.85f));
-        g.fillRect (b.getX(), b.getCentreY() - 0.75f, 7.0f, 1.5f);
-        g.fillRect (b.getRight() - 7.0f, b.getCentreY() - 0.75f, 7.0f, 1.5f);
-        g.setColour (on && ! flash ? ff::bg : ff::ink);
-        g.setFont (ff::font (i == 1 ? 13.0f : 15.0f, 0.06f));
-        g.drawText (flash ? "SAVED" : labels[i], b, Justification::centred, false);
+        g.setColour (ff::red.withAlpha (0.22f));
+        g.fillEllipse (p.x - 12.0f, p.y - 12.0f, 24.0f, 24.0f);
+    }
+    g.setColour (lit ? ff::red : ff::pin);
+    g.fillEllipse (p.x - 7.0f, p.y - 7.0f, 14.0f, 14.0f);
 
-        if (i != 1 && proc.hasPresetSlot (i))
+    auto text = r.withTrimmedLeft (40.0f);
+    g.setColour (lit ? ff::ink : ff::dim);
+    g.setFont (ff::font (on ? 16.0f : 19.0f, 0.08f));
+    g.drawText (on ? "BYPASSED" : "ON", text.removeFromTop (r.getHeight() * 0.6f).withTrimmedTop (6.0f), Justification::bottomLeft, false);
+    ff::label (g, on ? "LAYERS RING OUT" : "A+B BYPASSES", text.toNearestInt(), Justification::topLeft, ff::dim, 10.0f);
+}
+
+// =====================================================================================
+// Presets
+// =====================================================================================
+Rectangle<float> PresetBanks::cell (int i) const
+{
+    const int bank = i / 4, k = i % 4;
+    return { (float) (3 + bank * 100 + k * 24), 3.0f, 20.0f, 20.0f };
+}
+
+void PresetBanks::paint (Graphics& g)
+{
+    static const Colour banks[4] = { ff::bankR, ff::bankY, ff::bankG, ff::bankB };
+    const int sel = proc.selectedPreset();
+    for (int i = 0; i < AfterglowProcessor::kPresets; ++i)
+    {
+        auto c = cell (i);
+        const Colour col = banks[i / 4];
+        const bool flash = i == flashSlot && nowSeconds() < flashUntil;
+        if (proc.hasPreset (i) || flash)
         {
-            g.setColour (ff::dim);
-            g.fillEllipse (b.getCentreX() - 2.0f, b.getBottom() + 3.0f, 4.0f, 4.0f);
+            g.setColour (flash ? ff::ink : col);
+            g.fillRoundedRectangle (c, 6.0f);
+        }
+        else
+        {
+            g.setColour (col.withAlpha (0.45f));
+            g.drawRoundedRectangle (c.reduced (1.0f), 6.0f, 2.0f);
+        }
+        if (i == sel)
+        {
+            g.setColour (ff::ink);
+            g.drawRoundedRectangle (c.expanded (2.5f), 8.0f, 1.5f);
         }
     }
+    ff::label (g, flashUntil > nowSeconds() ? String ("SAVED") : String::fromUTF8 ("TAP TO LOAD · HOLD TO SAVE · D STEPS"),
+               { 0, 30, getWidth(), 16 }, Justification::centredLeft, ff::faint.brighter (0.4f), 11.0f);
 }
 
-void PresetToggle::mouseDown (const MouseEvent& e)
+void PresetBanks::mouseDown (const MouseEvent& e)
 {
-    pressedCell = -1;
-    for (int i = 0; i < 3; ++i)
-        if (cell (i).contains (e.position)) pressedCell = i;
+    pressed = -1;
+    for (int i = 0; i < AfterglowProcessor::kPresets; ++i)
+        if (cell (i).expanded (2.0f).contains (e.position)) pressed = i;
     downAt = nowSeconds();
     saved = false;
     startTimer (40);
 }
 
-void PresetToggle::timerCallback()
+void PresetBanks::timerCallback()
 {
-    if (pressedCell >= 0 && pressedCell != 1 && ! saved && nowSeconds() - downAt > 0.8)
+    // hold to save
+    if (pressed >= 0 && ! saved && nowSeconds() - downAt > 0.7)
     {
-        proc.savePresetSlot (pressedCell);
+        proc.savePreset (pressed);
         saved = true;
-        savedCell = pressedCell;
-        savedFlashUntil = nowSeconds() + 0.9;
+        flashSlot = pressed;
+        flashUntil = nowSeconds() + 0.9;
     }
-    if (pressedCell < 0 && nowSeconds() > savedFlashUntil)
+    if (pressed < 0 && nowSeconds() > flashUntil)
         stopTimer();
     repaint();
 }
 
-void PresetToggle::mouseUp (const MouseEvent&)
+void PresetBanks::mouseUp (const MouseEvent&)
 {
-    if (pressedCell >= 0 && ! saved)
-        setParam (proc.apvts.getParameter (ParamIDs::presetSlot), (float) pressedCell);
-    pressedCell = -1;
+    if (pressed >= 0 && ! saved) proc.loadPreset (pressed);
+    pressed = -1;
     repaint();
 }
 
-BypassButton::BypassButton (AfterglowProcessor& p)
+// =====================================================================================
+// Footswitches and expression
+// =====================================================================================
+FootswitchCard::FootswitchCard (AfterglowProcessor& p, int s)
+    : proc (p), sw (s),
+      learn ("LEARN", [this] { proc.learnFootswitch (sw); }),
+      reset ("DEFAULTS", [this] { proc.resetFootswitches(); })
 {
-    setMouseCursor (MouseCursor::PointingHandCursor);
-    attachment = std::make_unique<ParameterAttachment> (*p.apvts.getParameter (ParamIDs::bypass), [this] (float v) { bypassed = v > 0.5f; repaint(); });
-    attachment->sendInitialUpdate();
+    letter.setTextHeight (54.0f);
+    letter.setValue (String::charToString ((juce_wchar) ('A' + s)));
+    addAndMakeVisible (letter);
+    addAndMakeVisible (learn);
+    addAndMakeVisible (reset);
+    if (s == 0)
+    {
+        sustain = std::make_unique<ToggleChip> (p.apvts, ParamIDs::sustainCC, "KEYBOARD SUSTAIN OFF", "KEYBOARD SUSTAIN ON", true, 12.0f);
+        addAndMakeVisible (*sustain);
+    }
 }
 
-void BypassButton::mouseDown (const MouseEvent&) { attachment->setValueAsCompleteGesture (bypassed ? 0.0f : 1.0f); }
-
-void BypassButton::paint (Graphics& g)
+void FootswitchCard::resized()
 {
-    auto r = getLocalBounds().toFloat().reduced (1.0f);
-    const bool on = ! bypassed;
-    g.setColour (ff::housing);
-    g.fillRoundedRectangle (r, 12.0f);
-    g.setColour (on ? ff::ink : ff::line);
-    g.drawRoundedRectangle (r.reduced (1.0f), 12.0f, 2.0f);
+    letter.setBounds (16, 42, 258, 96);
+    if (sustain) sustain->setBounds (16, 320, 170, 28);
+    learn.setBounds (16, 390, 124, 34);
+    reset.setBounds (150, 390, 124, 34);
+}
 
-    const Point<float> led (r.getX() + 25.0f, r.getCentreY());
-    if (on)
+void FootswitchCard::paint (Graphics& g)
+{
+    g.setColour (ff::face);
+    g.fillRoundedRectangle (getLocalBounds().toFloat(), 12.0f);
+    ff::label (g, "FOOTSWITCH", { 16, 14, 258, 18 });
+
+    static const char* const tapJobs[4] = { "BRASS PEDAL", "AUX ON / OFF", "KILL DRY", "NEXT PRESET" };
+    static const char* const holdJobs[4] = { "SUSTAINS WHILE HELD", "NEXT AUX MODE", "CLEAR LAYERS", "PREVIOUS PRESET" };
+    static const char* const notes[4] = { "DOUBLE TAP CLEARS, LIKE THE PEDAL", "WET, LATCH OR HIDE, SET ON MAIN", "LAYERS ONLY, THE DRY SIGNAL GOES", "PRESETS SAVE EVERY KNOB" };
+    static const char* const combos[4] = { "A+B  BYPASS, LAYERS RING OUT", "A+B  BYPASS, LAYERS RING OUT",
+                                           "C+D  NEXT AFTERGLOW, HOLD 1 S TO KEEP", "C+D  NEXT AFTERGLOW, HOLD 1 S TO KEEP" };
+    struct Row { const char* k; String v; };
+    const Row rows[3] = { { "TAP", tapJobs[sw] }, { "HOLD", holdJobs[sw] }, { "LISTENS FOR", sends } };
+    int y = 150;
+    for (const auto& r : rows)
     {
-        g.setColour (ff::red.withAlpha (0.22f));
-        g.fillEllipse (led.x - 12.0f, led.y - 12.0f, 24.0f, 24.0f);
-        g.setColour (ff::red);
+        g.setColour (ff::ring);
+        g.fillRect (16, y, 258, 2);
+        ff::label (g, r.k, { 16, y + 4, 120, 30 }, Justification::centredLeft, ff::dim, 13.0f);
+        ff::label (g, r.v, { 110, y + 4, 164, 30 }, Justification::centredRight, ff::ink, 14.0f);
+        y += 38;
     }
-    else
+    g.setColour (ff::ring);
+    g.fillRect (16, y, 258, 2);
+    ff::label (g, notes[sw], { 16, y + 8, 258, 18 }, Justification::centredLeft, ff::dim, 11.0f);
+    ff::label (g, combos[sw], { 16, y + 32, 258, 18 }, Justification::centredLeft, ff::dim, 11.0f);
+    if (sw == 0)
+        ff::label (g, "YOUR KEYBOARD'S PEDAL WORKS IT TOO", { 16, 352, 258, 18 }, Justification::centredLeft, ff::faint.brighter (0.4f), 11.0f);
+}
+
+void FootswitchCard::tick()
+{
+    const auto& st = proc.pedals();
+    const String t = proc.pedalsDirect() ? "CC " + String (st.fsCC[(size_t) sw]) + String::fromUTF8 (" · ANY CH")
+                                         : "CH " + String (st.fsChannel[(size_t) sw]) + String::fromUTF8 (" · CC ") + String (st.fsCC[(size_t) sw]);
+    if (t != sends) { sends = t; repaint(); }
+    learn.setLit (proc.learningWhat() == sw);
+    learn.setText (proc.learningWhat() == sw ? "PRESS IT NOW" : "LEARN");
+    const bool down = (proc.uiFootDown.load() >> sw) & 1;
+    letter.setAlpha (down ? 0.6f : 1.0f);
+}
+
+void BigButton::set (const String& m, const String& sm, Colour c)
+{
+    if (m == mainText && sm == smallText && c == borderColour) return;
+    mainText = m; smallText = sm; borderColour = c;
+    repaint();
+}
+
+void BigButton::paint (Graphics& g)
+{
+    auto b = getLocalBounds().toFloat().reduced (1.0f);
+    g.setColour (pressed ? ff::ring : ff::bg);
+    g.fillRoundedRectangle (b, b.getHeight() * 0.5f);
+    g.setColour (borderColour);
+    g.drawRoundedRectangle (b, b.getHeight() * 0.5f, 2.0f);
+    const float big = 13.0f, small = 9.5f;
+    const float top = b.getCentreY() - (big + small + 1.0f) * 0.5f;
+    ff::label (g, mainText, Rectangle<float> (b.getX(), top, b.getWidth(), big).toNearestInt(), Justification::centred, ff::ink, big);
+    ff::label (g, smallText, Rectangle<float> (b.getX(), top + big + 1.0f, b.getWidth(), small).toNearestInt(), Justification::centred, ff::dim, small);
+}
+
+void BigButton::mouseDown (const MouseEvent& e)
+{
+    if (e.mods.isPopupMenu()) { if (onRightClick) onRightClick(); return; }
+    pressed = true; repaint();
+    if (onDown) onDown();
+}
+
+void MiniFoot::paint (Graphics& g)
+{
+    const bool down = (proc.uiFootDown.load() >> sw) & 1;
+    auto b = getLocalBounds().toFloat().reduced (1.0f);
+    g.setColour (down ? ff::ink : ff::bg);
+    g.fillRoundedRectangle (b, 7.0f);
+    // lit while its job is on: A the Brass Pedal, B the Aux, C Kill Dry, D a preset loaded
+    auto& s = proc.apvts;
+    bool lit = false;
+    Colour col = ff::line;
+    if (sw == 0) { lit = proc.getEngine().uiDown.load(); col = ff::brass; }
+    if (sw == 1) { lit = s.getRawParameterValue (ParamIDs::fsOn)->load() > 0.5f; col = ff::coral; }
+    if (sw == 2) { lit = s.getRawParameterValue (ParamIDs::killDry)->load() > 0.5f; col = ff::red; }
+    if (sw == 3)
     {
-        g.setColour (ff::pin);
+        static const Colour banks[4] = { ff::bankR, ff::bankY, ff::bankG, ff::bankB };
+        const int sel = proc.selectedPreset();
+        lit = sel >= 0;
+        if (lit) col = banks[jlimit (0, 3, sel / 4)];
     }
-    g.fillEllipse (led.x - 7.0f, led.y - 7.0f, 14.0f, 14.0f);
+    g.setColour (down ? ff::ink : (lit ? col : ff::line));
+    g.drawRoundedRectangle (b.reduced (lit ? 1.0f : 0.0f), 7.0f, lit ? 3.0f : 2.0f);
+    ff::label (g, String::charToString ((juce_wchar) ('A' + sw)), getLocalBounds(), Justification::centred, down ? ff::bg : ff::ink, 14.0f);
+}
 
-    g.setColour (on ? ff::ink : ff::dim);
-    g.setFont (ff::font (20.0f, 0.08f));
-    g.drawText (on ? "ON" : "BYPASSED", r.withTrimmedLeft (46.0f), Justification::centredLeft, false);
+void FootInputLabel::paint (Graphics& g)
+{
+    // a dot that lights when the footswitch is plugged in and heard directly
+    g.setColour (proc.pedalsDirect() ? ff::bankG : ff::ring);
+    g.fillEllipse (0.0f, (float) getHeight() * 0.5f - 4.0f, 8.0f, 8.0f);
+    ff::label (g, "FOOTSWITCHES  v", getLocalBounds().withTrimmedLeft (14), Justification::centredLeft, ff::dim, 12.0f);
+}
 
-    auto cap = r.withTrimmedRight (16.0f);
-    g.setColour (ff::dim);
-    g.setFont (ff::font (12.0f, 0.06f));
-    g.drawText ("TAP BYPASS", cap.withTrimmedBottom (cap.getHeight() * 0.5f).withTrimmedTop (8.0f), Justification::centredRight, false);
-    g.drawText ("TAILS RING OUT", cap.withTrimmedTop (cap.getHeight() * 0.5f).withTrimmedBottom (8.0f), Justification::centredRight, false);
+void FootInputLabel::mouseDown (const MouseEvent&)
+{
+    PopupMenu m;
+    m.addSectionHeader ("Footswitch input");
+    m.addItem (-1, proc.footInputStatus(), false, false);
+    const auto chosen = proc.footDevice();
+    m.addItem (10, "Find my footswitch automatically", true, chosen.isEmpty());
+    const auto devices = DirectMidiInput::deviceNames();
+    for (int i = 0; i < devices.size() && i < 40; ++i)
+        m.addItem (100 + i, "Use " + devices[i], true, chosen == devices[i]);
+    m.addItem (11, "Only from a MIDI track in Ableton", true, chosen == "none");
+    m.showMenuAsync (PopupMenu::Options().withTargetComponent (this), [this, devices] (int r)
+    {
+        if (r == 10) proc.setFootDevice ({});
+        else if (r == 11) proc.setFootDevice ("none");
+        else if (r >= 100 && r - 100 < devices.size()) proc.setFootDevice (devices[r - 100]);
+        repaint();
+    });
+}
+
+void ExpressionMeter::paint (Graphics& g)
+{
+    const auto& t = names::expTargets();
+    const int target = jlimit (0, (int) t.size() - 1, roundToInt (proc.apvts.getRawParameterValue (ParamIDs::expTarget)->load()));
+    String text = String::fromUTF8 ("EXP · ") + String (t[(size_t) target].label).toUpperCase() + "  v";
+    if (proc.isCalibrating()) text = "ROCK HEEL TO TOE";
+    else if (proc.learningWhat() == AfterglowProcessor::LearnExpression) text = "MOVE THE PEDAL";
+    ff::label (g, text, { 0, 0, getWidth(), 16 }, Justification::centredLeft, proc.isCalibrating() ? ff::ink : ff::dim, 11.0f);
+    const float v = proc.expressionLevel();
+    const float x0 = 8.0f, w = (float) getWidth() - 16.0f, y = 24.0f;
+    g.setColour (ff::ring);
+    g.fillRoundedRectangle (x0, y, w, 8.0f, 4.0f);
+    const bool fresh = nowSeconds() - proc.lastExpressionMove() < 1.5;
+    const Colour c = target == 0 ? ff::brass : ff::ink;
+    g.setColour (fresh ? c : ff::dim);
+    g.fillRoundedRectangle (x0, y, w * v, 8.0f, 4.0f);
+    g.fillEllipse (x0 + w * v - 8.0f, y - 4.0f, 16.0f, 16.0f);
+}
+
+void ExpressionMeter::mouseDown (const MouseEvent&)
+{
+    PopupMenu targets;
+    const auto& t = names::expTargets();
+    const int target = roundToInt (proc.apvts.getRawParameterValue (ParamIDs::expTarget)->load());
+    for (int i = 0; i < (int) t.size(); ++i) targets.addItem (100 + i, t[(size_t) i].label, true, i == target);
+    PopupMenu curves;
+    const char* const curveNames[3] = { "Linear", "Slow start", "Fast start" };
+    for (int i = 0; i < 3; ++i) curves.addItem (200 + i, curveNames[i], true, proc.pedals().curve == i);
+    PopupMenu map;
+    map.addItem (300, "Off", true, proc.pedals().pedalMapChannel == 0);
+    for (int ch = 1; ch <= 16; ++ch) map.addItem (300 + ch, "Channel " + String (ch), true, proc.pedals().pedalMapChannel == ch);
+
+    PopupMenu m;
+    m.addSubMenu ("Expression moves", targets);
+    m.addItem (1, "Calibrate heel and toe");
+    m.addItem (2, "Learn expression pedal");
+    m.addSubMenu ("Curve", curves);
+    m.addSeparator();
+    m.addSubMenu ("Original pedal MIDI map", map);
+    m.showMenuAsync (PopupMenu::Options().withTargetComponent (this), [this] (int r)
+    {
+        if (r == 1) proc.calibrateExpression();
+        else if (r == 2) proc.learnExpression();
+        else if (r >= 100 && r < 200) setParam (proc.apvts.getParameter (ParamIDs::expTarget), (float) (r - 100));
+        else if (r >= 200 && r < 300) { proc.pedals().curve = r - 200; proc.pedals().save(); }
+        else if (r >= 300) { proc.pedals().pedalMapChannel = r - 300; proc.pedals().save(); }
+        repaint();
+    });
 }
 
 // =====================================================================================
 // Pebble
 // =====================================================================================
-void PebbleStrip::update (double t, double dt)
+void Pebble::update (double t, double dt)
 {
     now = t;
     const auto& eng = proc.getEngine();
     level = eng.uiInput.load();
     active = eng.uiActive.load();
-    rising = eng.uiRising.load();
     held = eng.uiHeld.load();
     mode = eng.uiMode.load();
     down = eng.uiDown.load();
-    bypassed = proc.apvts.getRawParameterValue (ParamIDs::bypass)->load() > 0.5f;
+    const bool bypassed = proc.apvts.getRawParameterValue (ParamIDs::bypass)->load() > 0.5f;
     const bool layersInf = std::lround (proc.apvts.getRawParameterValue (ParamIDs::layers)->load()) == 10;
     const bool decayInf = ag::Times::decayInfinite (proc.apvts.getRawParameterValue (ParamIDs::decay)->load());
     infinite = active > 0 && (layersInf || decayInf);
@@ -741,11 +839,20 @@ void PebbleStrip::update (double t, double dt)
     asleep = bypassed || t - lastSound > 6.0;
 
     const int caps = eng.uiCaptures.load();
-    if (caps != lastCaptures) { if (caps > lastCaptures) { catchUntil = t + 0.35; hop = 1.0f; } lastCaptures = caps; }
+    if (caps != lastCaptures) { if (caps > lastCaptures) { catchUntil = t + 0.35; hop = jmax (hop, 0.7f); } lastCaptures = caps; }
     const int clears = eng.uiClears.load();
     if (clears != lastClears) { if (clears > lastClears) clearUntil = t + 0.7; lastClears = clears; }
     if (eng.uiPeak.load() > 0.98f) clipUntil = t + 0.8;
+
+    // taps its foot whenever a footswitch goes down
+    const int pulse = proc.uiFootPulse.load();
+    if (pulse != lastPulse) { lastPulse = pulse; hop = 1.0f; }
     hop *= (float) std::exp (-dt / 0.12);
+    nodding *= (float) std::exp (-dt / 0.35);
+    // leans with the expression pedal while it moves
+    const bool expFresh = t - proc.lastExpressionMove() < 2.0;
+    const float leanTarget = expFresh ? (proc.expressionLevel() - 0.5f) * 16.0f : 0.0f;
+    lean += (leanTarget - lean) * (float) (1.0 - std::exp (-dt / 0.1));
 
     if (t > nextBlink)
     {
@@ -753,36 +860,23 @@ void PebbleStrip::update (double t, double dt)
         nextBlink = t + 2.5 + Random::getSystemRandom().nextDouble() * 3.0;
     }
     blinking = t < blinkUntil;
-
-    const bool latched = eng.uiLatched.load();
-    if (bypassed) status = "BYPASSED";
-    else if (mode == ag::ModeSostenuto) status = down ? "SOSTENUTO" : "PIANO";
-    else if (mode != ag::ModeNormal) status = down ? "DAMPERS UP" : "PIANO";
-    else if (down && held > 0) status = latched ? "LATCHED" : "HOLDING";
-    else if (down) status = eng.uiGroupClosed.load() ? "GROUP FULL" : "CATCHING";
-    else if (active > 0) status = "FADING";
-    else status = "LISTENING";
-
-    if (active == 0) detail = down ? "PLAY A NOTE" : "PRESS THE PEDAL";
-    else detail = String (active) + (active == 1 ? " LAYER" : " LAYERS") + (rising > 0 ? dot + String (rising) + " BLOOMING" : String());
     repaint();
 }
 
-void PebbleStrip::paintPebble (Graphics& g, Rectangle<float> a)
+void Pebble::paint (Graphics& g)
 {
-    // Pebble from Flip Fella. Its eyes pop when a layer is caught, it holds its breath
-    // while layers are held, rings stack above it as layers build, spiral eyes at
-    // infinity, a halo in the piano modes, startled when cleared, red when clipping.
-    const float s = a.getWidth() / 140.0f;
+    auto a = getLocalBounds().toFloat();
+    const float s = a.getWidth() / 150.0f;
     const bool clearing = now < clearUntil;
     const bool catching = now < catchUntil;
     const bool clipping = now < clipUntil;
     const bool holding = down && held > 0 && ! asleep;
     const float bob = asleep ? 0.0f : 1.5f * (float) std::sin (now * 2.4);
     const float breathe = asleep ? 1.0f + 0.025f * (float) std::sin (now * 1.6) : (holding ? 1.05f : 1.0f);
-    const float dy = bob - hop * 12.0f;
+    const float dy = bob - hop * 10.0f + 8.0f * nodding * (float) std::sin (nodding * 12.0f);
+    const float tilt = degreesToRadians (lean);
     const auto tf = AffineTransform::translation (-100.0f, -100.0f).scaled (s * breathe, s / breathe)
-                        .translated (a.getCentreX(), a.getCentreY() + 10.0f * s);
+                        .rotated (tilt, 0.0f, 50.0f * s).translated (a.getCentreX(), a.getCentreY() + 12.0f * s);
     auto ell = [&] (float cx, float cy, float rx, float ry, Colour col)
     {
         Path p; p.addEllipse (cx - rx, cy - ry, rx * 2, ry * 2);
@@ -802,6 +896,11 @@ void PebbleStrip::paintPebble (Graphics& g, Rectangle<float> a)
         PathStrokeType (5.0f).createDashedStroke (dashed, halo, dashes, 2);
         g.setColour (modeColour (mode));
         g.fillPath (dashed, tf);
+    }
+    else if (holding)
+    {
+        Path ringPath; ringPath.addEllipse (100 - 66, 100 - 56 + dy, 132, 112);
+        stroke (ringPath, 5.0f, ff::brass.withAlpha (0.65f));
     }
 
     // rings above the head, one per few layers
@@ -920,25 +1019,10 @@ void PebbleStrip::paintPebble (Graphics& g, Rectangle<float> a)
         {
             const float ph = (float) std::fmod (now * 0.5 + k / 3.0, 1.0);
             g.setColour (ff::ink.withAlpha (1.0f - ph));
-            g.drawText ("z", Rectangle<float> (a.getRight() - 14.0f + ph * 8.0f, a.getY() + 10.0f - ph * 18.0f, 16.0f, 16.0f),
+            g.drawText ("z", Rectangle<float> (a.getRight() - 16.0f + ph * 8.0f, a.getY() + 8.0f - ph * 14.0f, 16.0f, 16.0f),
                         Justification::centred, false);
         }
     }
-}
-
-void PebbleStrip::paint (Graphics& g)
-{
-    auto r = getLocalBounds();
-    g.setColour (ff::face);
-    g.fillRoundedRectangle (r.toFloat(), 12.0f);
-
-    auto inner = r.reduced (18, 10);
-    paintPebble (g, inner.removeFromLeft (80).toFloat());
-    inner.removeFromLeft (18);
-    auto info = inner.removeFromLeft (130).withTrimmedTop (6);
-    ff::label (g, "SUSTAIN", info.removeFromTop (18));
-    ff::label (g, status, info.removeFromTop (30), Justification::centredLeft, ff::ink, 22.0f);
-    ff::label (g, detail, info.removeFromTop (18));
 }
 } // namespace ui
 
@@ -949,45 +1033,84 @@ using namespace ui;
 
 AfterglowEditor::AfterglowEditor (AfterglowProcessor& p)
     : AudioProcessorEditor (&p), proc (p),
-      footswitch (p.apvts),
-      killDry (p.apvts, ParamIDs::killDry, "KILL DRY", 14.0f),
-      presets (p),
+      inputMode (p.apvts, ParamIDs::inputMode, { "GUITAR", "SYNTH", "BASS" }),
+      viewMain ("MAIN", [this] { setView (View::Main); }, 13.0f),
+      viewPedal ("PEDAL", [this] { setView (View::Pedal); }, 13.0f),
       layersDial (p),
       catchMode (p.apvts, ParamIDs::catchMode, { "SINGLE", "GROUP", "ALL" }),
+      clear ("CLEAR", [this] { proc.clearLayers(); }, 13.0f),
       rise (p.apvts, ParamIDs::rise, "Rise"),
       decay (p.apvts, ParamIDs::decay, "Decay"),
-      holdMode (p.apvts, ParamIDs::holdMode, { "NONE", "FIRST", "ALL" }),
-      lanes (p),
       tone (p.apvts, ParamIDs::tone, "Tone"),
-      resonance (p.apvts, ParamIDs::resonance, "Resonance", true),
-      level (p.apvts, ParamIDs::level, "Level"),
-      input (p.apvts, ParamIDs::input, "Input"),
-      pianoBox (p),
-      fxPos (p.apvts, ParamIDs::fxPos, { "PRE", "LOOP", "POST" }),
+      resonance (p.apvts, ParamIDs::resonance, "Resonance"),
+      holdMode (p.apvts, ParamIDs::holdMode, { "NONE", "FIRST", "ALL" }),
+      level (p.apvts, ParamIDs::level, "Level", true),
+      input (p.apvts, ParamIDs::input, "Input gain", false, true),
+      lanes (p),
+      fxType (p.apvts, ParamIDs::fxType, { "VERB", "DELAY", "CHORUS", "SHIMMER" }, 11.0f),
+      fxPos (p.apvts, ParamIDs::fxPos, { "PRE", "LOOP", "POST" }, 12.0f),
       fxAmount (p.apvts, ParamIDs::fxAmount, "Amount"),
       fxMix (p.apvts, ParamIDs::fxMix, "Mix"),
-      fxType (p.apvts, ParamIDs::fxType, { "VERB", "DELAY", "CHORUS", "SHIMMER" }, 14.0f, 2),
-      strip (p),
+      killDry (p.apvts, ParamIDs::killDry, "KILL DRY", "DRY KILLED", true, 12.0f),
+      auxOn (p.apvts, ParamIDs::fsOn, "OFF", "ON", true, 12.0f),
+      auxMode (p.apvts, ParamIDs::fsMode, { "WET", "LATCH", "HIDE" }, 12.0f),
+      pebble (p),
       pedal (p),
-      learn (p),
+      banks (p),
+      footInput (p),
+      expression (p),
       bypass (p)
 {
     setLookAndFeel (&lnf);
-    lnf.setColour (TextButton::buttonColourId, ff::bg);
-    lnf.setColour (TextButton::textColourOffId, ff::ink);
-
-    stateCard.setTextHeight (40.0f);
-    countCard.setTextHeight (40.0f);
-    fxCard.setTextHeight (40.0f);
-
-    clear.onClick = [this] { proc.clearLayers(); };
-
-    for (auto* c : std::initializer_list<Component*> { &footswitch, &killDry, &presets, &stateCard, &countCard, &layersDial, &catchMode,
-                                                       &rise, &decay, &holdMode, &lanes, &tone, &resonance, &level, &input, &pianoBox,
-                                                       &fxCard, &fxPos, &fxAmount, &fxMix, &fxType, &strip, &pedal, &learn, &clear, &bypass })
+    mainPage = { &stateCard, &countCard, &layersDial, &catchMode, &clear,
+                 &rise, &decay, &tone, &resonance, &holdMode,
+                 &level, &input, &lanes,
+                 &fxCard, &fxType, &fxPos, &fxAmount, &fxMix, &killDry, &auxOn, &auxMode };
+    for (auto* c : mainPage) addAndMakeVisible (c);
+    for (auto* c : std::initializer_list<Component*> { &inputMode, &viewMain, &viewPedal, &pebble, &pedal, &banks,
+                                                       &footInput, &expression, &bypass, &keepButton, &contextCard })
         addAndMakeVisible (c);
+    for (int k = 0; k < 4; ++k)
+    {
+        footCards[(size_t) k] = std::make_unique<FootswitchCard> (p, k);
+        addChildComponent (*footCards[(size_t) k]);
+        minis[(size_t) k] = std::make_unique<MiniFoot> (p, k);
+        addAndMakeVisible (*minis[(size_t) k]);
+    }
 
-    setSize (1260, 648);
+    stateCard.setTextHeight (34.0f);
+    countCard.setTextHeight (34.0f);
+    fxCard.setTextHeight (30.0f);
+
+    // Keeper: click to log the moment, right-click for notes, export and the folder
+    keepButton.set ("KEEP", "HOLD C+D", ff::line);
+    keepButton.onDown = [this] { proc.keepNow(); };
+    keepButton.onRightClick = [this] { keeperMenu(); };
+    contextCard.setTextHeight (12.0f);
+    contextCard.setMouseCursor (MouseCursor::PointingHandCursor);
+    contextCard.setValue (proc.keeperLive() ? "LIVE" : "STUDIO");
+    contextCard.onClick = [this] (const MouseEvent&)
+    {
+        proc.setKeeperLive (! proc.keeperLive());
+        contextCard.setValue (proc.keeperLive() ? "LIVE" : "STUDIO");
+        proc.say (proc.keeperLive() ? "LIVE" : "STUDIO");
+    };
+    addChildComponent (noteEditor);
+    noteEditor.setTextToShowWhenEmpty ("Optional, Enter to save", ff::faint);
+    noteEditor.setFont (FontOptions (13.0f));
+    noteEditor.setIndents (10, 7);
+    noteEditor.setColour (TextEditor::backgroundColourId, ff::bg);
+    noteEditor.setColour (TextEditor::textColourId, ff::ink);
+    noteEditor.setColour (TextEditor::outlineColourId, ff::line);
+    noteEditor.setColour (TextEditor::focusedOutlineColourId, ff::ink);
+    noteEditor.setColour (CaretComponent::caretColourId, ff::ink);
+    noteEditor.setInputRestrictions (200);
+    noteEditor.onReturnKey = [this] { closeNote (true); };
+    noteEditor.onEscapeKey = [this] { closeNote (false); };
+    noteEditor.onTextChange = [this] { noteUntil = Time::getMillisecondCounterHiRes() * 0.001 + 20.0; };
+
+    setView (View::Main);
+    setSize (1260, 660);
     lastTick = Time::getMillisecondCounterHiRes() * 0.001;
     startTimerHz (60);
 }
@@ -996,6 +1119,51 @@ AfterglowEditor::~AfterglowEditor()
 {
     stopTimer();
     setLookAndFeel (nullptr);
+}
+
+void AfterglowEditor::setView (View v)
+{
+    view = v;
+    for (auto* c : mainPage) c->setVisible (v == View::Main);
+    for (auto& c : footCards) c->setVisible (v == View::Pedal);
+    viewMain.setLit (v == View::Main);
+    viewPedal.setLit (v == View::Pedal);
+    repaint();
+}
+
+void AfterglowEditor::keeperMenu()
+{
+    PopupMenu m;
+    m.addItem (1, "Add a note to Keeper No. " + String (proc.lastKeeper()), proc.lastKeeper() > 0);
+    m.addItem (2, "Export for Claude");
+    m.addItem (3, "Open the Keepers folder");
+    m.addSeparator();
+    m.addItem (4, "Learn a Keeper footswitch");
+    m.showMenuAsync (PopupMenu::Options().withTargetComponent (&keepButton), [this] (int r)
+    {
+        if (r == 1)
+        {
+            noteNumber = proc.lastKeeper();
+            noteEditor.clear();
+            noteEditor.setVisible (true);
+            noteEditor.grabKeyboardFocus();
+            noteUntil = Time::getMillisecondCounterHiRes() * 0.001 + 20.0;
+            repaint (136, 540, 190, 100);
+        }
+        else if (r == 2) proc.exportKeepers();
+        else if (r == 3) proc.openKeepersFolder();
+        else if (r == 4) proc.learnKeeper();
+    });
+}
+
+void AfterglowEditor::closeNote (bool save)
+{
+    if (save) proc.addKeeperNote (noteNumber, noteEditor.getText());
+    if (save && noteEditor.getText().trim().isNotEmpty()) proc.say ("NOTED");
+    noteEditor.setVisible (false);
+    noteEditor.clear();
+    noteUntil = 0.0;
+    repaint (136, 540, 190, 100);
 }
 
 void AfterglowEditor::section (Graphics& g, Rectangle<int> r) const
@@ -1010,63 +1178,94 @@ void AfterglowEditor::paint (Graphics& g)
     g.setColour (ff::ink);
     g.setFont (ff::font (26.0f, 0.04f));
     g.drawText ("AFTERGLOW", 20, 20, 170, 40, Justification::centredLeft, false);
-    ff::label (g, "SPECTRAL SUSTAIN, PIANO PEDAL", { 196, 20, 300, 40 });
-    ff::label (g, "FOOTSWITCH", { 626, 20, 90, 40 });
+    ff::label (g, "SPECTRAL SUSTAIN, PIANO PEDAL", { 184, 20, 280, 40 });
+    ff::label (g, "INPUT", { 470, 20, 50, 40 });
 
-    section (g, { 20, 76, 340, 440 });
-    section (g, { 376, 76, 250, 440 });
-    section (g, { 642, 76, 290, 440 });
-    section (g, { 948, 76, 292, 440 });
+    if (view == View::Main)
+    {
+        section (g, { 20, 76, 400, 440 });
+        section (g, { 440, 76, 250, 440 });
+        section (g, { 710, 76, 250, 440 });
+        section (g, { 980, 76, 260, 440 });
 
-    ff::label (g, "LAYERS", { 36, 92, 200, 16 });
-    ff::label (g, "CATCH", { 36, 456, 200, 16 });
-    ff::label (g, "ENVELOPE", { 392, 92, 200, 16 });
-    ff::label (g, "HOLD", { 392, 250, 200, 16 });
-    ff::label (g, "TONE + RESONANCE", { 658, 92, 250, 16 });
-    ff::label (g, "FX LOOP", { 964, 92, 100, 16 });
-    ff::label (g, fxMeaning, { 1040, 92, 184, 16 }, Justification::centredRight, ff::ink);
-    ff::label (g, "TYPE", { 964, 382, 100, 16 });
+        ff::label (g, "LAYERS", { 36, 92, 200, 16 });
+        ff::label (g, "CATCH", { 36, 452, 200, 16 });
+        ff::label (g, "SHAPE", { 456, 92, 200, 16 });
+        ff::label (g, "HOLD", { 456, 386, 200, 16 });
+        ff::label (g, holdHint, { 456, 446, 218, 18 }, Justification::centredLeft, ff::faint.brighter (0.4f), 12.0f);
+        const int mode = proc.getEngine().uiMode.load();
+        static const char* pianoNames[4] = { "HOLD NONE + TONE DOWN: PIANO", "PIANO MODE: REAL PIANO", "PIANO MODE: PIANO GROUP", "PIANO MODE: SOSTENUTO" };
+        ff::label (g, pianoNames[jlimit (0, 3, mode)], { 456, 466, 218, 18 }, Justification::centredLeft,
+                   mode == ag::ModeNormal ? ff::faint : ui::modeColour (mode), 12.0f);
+        ff::label (g, "LEVEL", { 726, 92, 200, 16 });
+        ff::label (g, "FX LOOP", { 996, 92, 100, 16 });
+        ff::label (g, posHint, { 1080, 92, 144, 16 }, Justification::centredRight, ff::ink);
+        ff::label (g, "AUX", { 996, 436, 60, 16 });
+        ff::label (g, auxHint, { 1040, 436, 184, 16 }, Justification::centredRight, ff::faint.brighter (0.4f), 11.0f);
+    }
+
+    section (g, { 20, 532, 1220, 112 });
+    if (noteEditor.isVisible())
+        ff::label (g, "KEPT No. " + String (noteNumber) + String::fromUTF8 (" · ADD A NOTE?"), { 140, 546, 180, 16 }, Justification::centredLeft, ff::ink, 12.0f);
+    else
+    {
+        ff::label (g, "PEBBLE", { 140, 542, 180, 16 });
+        ff::label (g, mood, { 140, 558, 180, 28 }, Justification::centredLeft, ff::ink, 21.0f);
+        ff::label (g, moodSub, { 140, 584, 180, 16 }, Justification::centredLeft, ff::dim, 11.0f);
+    }
+    ff::label (g, "USER PRESETS", { 562, 546, 380, 18 });
 }
 
 void AfterglowEditor::resized()
 {
     // header
-    footswitch.setBounds (718, 24, 240, 32);
-    killDry.setBounds (970, 24, 116, 32);
-    presets.setBounds (1100, 24, 140, 40);
+    inputMode.setBounds (520, 24, 240, 32);
+    viewMain.setBounds (1094, 24, 70, 32);
+    viewPedal.setBounds (1170, 24, 70, 32);
 
     // layers
-    stateCard.setBounds (36, 116, 226, 66);
-    countCard.setBounds (268, 116, 76, 66);
-    layersDial.setBounds (36, 190, 308, 262);
-    catchMode.setBounds (36, 474, 308, 32);
+    stateCard.setBounds (36, 116, 262, 66);
+    countCard.setBounds (306, 116, 98, 66);
+    layersDial.setBounds (36, 186, 368, 262);
+    catchMode.setBounds (36, 472, 270, 32);
+    clear.setBounds (314, 472, 90, 32);
 
-    // envelope
-    rise.setBounds (386, 112, 115, 128);
-    decay.setBounds (501, 112, 115, 128);
-    holdMode.setBounds (392, 268, 218, 32);
-    lanes.setBounds (392, 316, 218, 184);
+    // shape
+    rise.setBounds (456, 116, 110, 128);
+    decay.setBounds (570, 116, 110, 128);
+    tone.setBounds (456, 252, 110, 128);
+    resonance.setBounds (570, 252, 110, 128);
+    holdMode.setBounds (456, 406, 218, 32);
 
-    // tone + resonance
-    tone.setBounds (652, 112, 135, 128);
-    resonance.setBounds (787, 112, 135, 128);
-    level.setBounds (652, 248, 135, 128);
-    input.setBounds (787, 248, 135, 128);
-    pianoBox.setBounds (658, 392, 258, 108);
+    // level and lanes
+    level.setBounds (726, 116, 110, 128);
+    input.setBounds (840, 116, 110, 128);
+    lanes.setBounds (726, 262, 218, 238);
 
     // fx loop
-    fxCard.setBounds (964, 116, 260, 66);
-    fxPos.setBounds (964, 192, 260, 32);
-    fxAmount.setBounds (958, 236, 135, 128);
-    fxMix.setBounds (1093, 236, 135, 128);
-    fxType.setBounds (964, 402, 260, 98);
+    fxCard.setBounds (996, 116, 228, 60);
+    fxType.setBounds (996, 186, 228, 30);
+    fxAmount.setBounds (996, 222, 110, 128);
+    fxMix.setBounds (1114, 222, 110, 128);
+    fxPos.setBounds (996, 358, 228, 30);
+    killDry.setBounds (996, 396, 228, 30);
+    auxMode.setBounds (996, 458, 160, 30);
+    auxOn.setBounds (1164, 458, 60, 30);
 
-    // bottom bar
-    strip.setBounds (20, 532, 1220, 96);
-    pedal.setBounds (262, 546, 538, 68);
-    learn.setBounds (812, 558, 90, 44);
-    clear.setBounds (912, 558, 80, 44);
-    bypass.setBounds (1004, 548, 220, 64);
+    // pedal page: one card per footswitch
+    for (int k = 0; k < 4; ++k) footCards[(size_t) k]->setBounds (20 + k * 310, 76, 290, 440);
+
+    // the strip, left to right: Pebble and Keeper, the Brass Pedal, presets, footswitches, bypass
+    pebble.setBounds (32, 540, 96, 98);
+    noteEditor.setBounds (140, 566, 180, 30);
+    keepButton.setBounds (140, 604, 96, 32);
+    contextCard.setBounds (244, 604, 76, 32);
+    pedal.setBounds (332, 552, 216, 76);
+    banks.setBounds (562, 568, 400, 50);
+    footInput.setBounds (972, 542, 132, 20);
+    for (int k = 0; k < 4; ++k) minis[(size_t) k]->setBounds (972 + k * 34, 566, 30, 30);
+    expression.setBounds (972, 602, 132, 36);
+    bypass.setBounds (1114, 556, 112, 64);
 }
 
 void AfterglowEditor::timerCallback()
@@ -1077,18 +1276,20 @@ void AfterglowEditor::timerCallback()
     auto& s = proc.apvts;
     const auto& eng = proc.getEngine();
 
-    for (auto* c : { &stateCard, &countCard, &fxCard })
+    for (auto* c : { &stateCard, &countCard, &fxCard, &contextCard })
         c->advance (dt);
+    for (auto& c : footCards) c->tick();
 
     // flip cards: what the engine is doing, how many layers, which effect
     const int mode = eng.uiMode.load();
     const bool down = eng.uiDown.load();
     const int active = eng.uiActive.load();
+    const bool bypassed = s.getRawParameterValue (ParamIDs::bypass)->load() > 0.5f;
     String state;
-    if (s.getRawParameterValue (ParamIDs::bypass)->load() > 0.5f) state = "BYPASS";
+    if (bypassed) state = "BYPASSED";
     else if (mode == ag::ModeSostenuto) state = "SOSTENUTO";
     else if (mode != ag::ModeNormal) state = down ? "RINGING" : "PIANO";
-    else if (down) state = eng.uiHeld.load() > 0 ? "HOLDING" : "CATCHING";
+    else if (down) state = eng.uiHeld.load() > 0 ? (eng.uiLatched.load() ? "LATCHED" : "HOLDING") : "CATCHING";
     else state = active > 0 ? "FADING" : "READY";
     stateCard.setValue (state);
 
@@ -1098,14 +1299,59 @@ void AfterglowEditor::timerCallback()
     static const char* fxNames[4] = { "REVERB", "DELAY", "CHORUS", "SHIMMER" };
     fxCard.setValue (fxNames[jlimit (0, 3, (int) std::lround (s.getRawParameterValue (ParamIDs::fxType)->load()))]);
 
-    static const char* meanings[3] = { "BEFORE THE ENGINE", "LAYERS ONLY", "WHOLE MIX" };
-    const String m = meanings[jlimit (0, 2, (int) std::lround (s.getRawParameterValue (ParamIDs::fxPos)->load()))];
-    if (m != fxMeaning) { fxMeaning = m; repaint (1040, 88, 190, 24); }
+    static const char* posMeanings[3] = { "BEFORE THE LAYERS", "ON THE LAYERS", "ON EVERYTHING" };
+    static const char* holdMeanings[3] = { "LAYERS RISE, THEN FADE", "FIRST LAYER HELD, THE REST FADE", "ALL HELD WHILE THE PEDAL IS DOWN" };
+    static const char* auxMeanings[3] = { "KILLS THE DRY", "LATCHES THE PEDAL", "HIDES LAYERS WHILE DOWN" };
+    const String ph = posMeanings[jlimit (0, 2, (int) std::lround (s.getRawParameterValue (ParamIDs::fxPos)->load()))];
+    const String hh = holdMeanings[jlimit (0, 2, (int) std::lround (s.getRawParameterValue (ParamIDs::holdMode)->load()))];
+    const String ah = String ("B: ") + auxMeanings[jlimit (0, 2, (int) std::lround (s.getRawParameterValue (ParamIDs::fsMode)->load()))];
 
-    strip.update (now, dt);
+    // Pebble's status lines
+    String m, sub;
+    const int caps = eng.uiRising.load();
+    if (now - proc.uiMessageAt < 2.5 && proc.uiMessage.isNotEmpty()) { m = proc.uiMessage; sub = "PEBBLE IS ON IT"; }
+    else if (bypassed) { m = "NAPPING"; sub = "BYPASSED"; }
+    else if (mode == ag::ModeSostenuto) { m = down ? "SOSTENUTO" : "PIANO"; sub = down ? "THE CHORD RINGS AGAIN" : "PRESS TO HOLD A CHORD"; }
+    else if (mode != ag::ModeNormal) { m = down ? "DAMPERS UP" : "PIANO"; sub = down ? "NOTES RING ON" : "LIFT TO DAMP"; }
+    else if (down && eng.uiHeld.load() > 0) { m = eng.uiLatched.load() ? "LATCHED" : "HOLDING"; sub = String (active) + (active == 1 ? " LAYER" : " LAYERS"); }
+    else if (down) { m = eng.uiGroupClosed.load() ? "GROUP FULL" : "CATCHING"; sub = "PLAY A NOTE"; }
+    else if (active > 0) { m = "FADING"; sub = String (active) + (active == 1 ? " LAYER" : " LAYERS") + (caps > 0 ? dot + String (caps) + " BLOOMING" : String()); }
+    else { m = "LISTENING"; sub = "PRESS THE BRASS PEDAL"; }
+
+    if (ph != posHint || hh != holdHint || ah != auxHint || m != mood || sub != moodSub)
+    {
+        posHint = ph; holdHint = hh; auxHint = ah; mood = m; moodSub = sub;
+        repaint();
+    }
+    if (mode != lastMode) { lastMode = mode; repaint (440, 440, 260, 60); }
+
+    // Keeper: flip to KEPT, Pebble nods, offer a note for ten seconds without taking the keyboard
+    const int kp = proc.uiKeepPulse.load();
+    if (kp != lastKeepPulse)
+    {
+        lastKeepPulse = kp;
+        keptUntil = now + 1.8;
+        contextCard.setValue ("KEPT");
+        pebble.nod();
+        noteNumber = 0;
+        noteEditor.clear();
+        noteEditor.setVisible (true);
+        noteUntil = now + 10.0;
+        repaint (136, 540, 190, 100);
+    }
+    if (noteNumber == 0 && proc.lastKeeper() > 0 && noteEditor.isVisible()) { noteNumber = proc.lastKeeper(); repaint (136, 540, 190, 100); }
+    if (keptUntil > 0.0 && now > keptUntil) { keptUntil = 0.0; contextCard.setValue (proc.keeperLive() ? "LIVE" : "STUDIO"); }
+    if (noteEditor.isVisible() && now > noteUntil && ! noteEditor.hasKeyboardFocus (true)) closeNote (false);
+    const bool learningKeep = proc.learningWhat() == AfterglowProcessor::LearnKeeper;
+    keepButton.set (learningKeep ? "PRESS IT" : "KEEP", learningKeep ? "YOUR SWITCH" : "HOLD C+D", learningKeep ? ff::ink : ff::line);
+
+    pebble.update (now, dt);
     layersDial.repaint();
     lanes.repaint();
-    pianoBox.repaint();
     pedal.repaint();
-    learn.repaint();
+    banks.repaint();
+    bypass.repaint();
+    expression.repaint();
+    footInput.repaint();
+    for (auto& mf : minis) mf->repaint();
 }

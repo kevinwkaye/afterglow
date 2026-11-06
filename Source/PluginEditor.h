@@ -19,6 +19,9 @@ const juce::Colour line      { 0xff3a3a3a };
 const juce::Colour ring      { 0xff1a1a1a };
 const juce::Colour pin       { 0xff3c3c3c };
 const juce::Colour red       { 0xffe8392f };
+const juce::Colour teal      { 0xff3fd6c8 };
+const juce::Colour coral     { 0xffff7a59 };
+const juce::Colour amber     { 0xfff2c230 };
 const juce::Colour brass     { 0xffd4a537 };
 const juce::Colour piano     { 0xffe8b923 }; // real piano and piano group
 const juce::Colour sost      { 0xff4a90e2 }; // sostenuto
@@ -27,6 +30,11 @@ const juce::Colour blobShade { 0xff2329a8 };
 const juce::Colour eye       { 0xffffffff };
 const juce::Colour faceInk   { 0xff0b0b12 };
 const juce::Colour blush     { 0xfff28c8c };
+// the four preset banks
+const juce::Colour bankR     { 0xffe8392f };
+const juce::Colour bankY     { 0xfff2c230 };
+const juce::Colour bankG     { 0xff4fcf6a };
+const juce::Colour bankB     { 0xff4d8dff };
 
 juce::Font font (float height, float kerning = 0.04f);
 void label (juce::Graphics&, const juce::String& text, juce::Rectangle<int> r,
@@ -43,74 +51,79 @@ public:
     void setTextHeight (float h) { textHeight = h; }
     void advance (double dt);
     void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent& e) override { if (onClick) onClick (e); }
+    std::function<void (const juce::MouseEvent&)> onClick;
 
 private:
     void drawHalf (juce::Graphics&, juce::Rectangle<float> card, const juce::String& text, bool top, float scale, bool shade);
     juce::String current, previous;
     float progress = 1.0f;
-    float textHeight = 42.0f;
+    float textHeight = 34.0f;
 };
 
-// Rounded pill buttons bound to a choice parameter, in one row or a grid.
+// Rounded pill buttons bound to a choice parameter.
 class Pills : public juce::Component
 {
 public:
-    Pills (juce::AudioProcessorValueTreeState&, const juce::String& paramId, juce::StringArray labels, float textSize = 14.0f, int columns = 0);
+    Pills (juce::AudioProcessorValueTreeState&, const juce::String& paramId, juce::StringArray labels, float textSize = 13.0f);
     void paint (juce::Graphics&) override;
     void mouseDown (const juce::MouseEvent&) override;
 
 private:
     juce::Rectangle<float> cell (int i) const;
     juce::StringArray labels;
-    int selected = 0, columns = 0;
+    int selected = 0;
     float textSize;
     std::unique_ptr<juce::ParameterAttachment> attachment;
 };
 
-// A single pill that turns ink-white when its switch is on.
+// A single pill that turns ink-white when its switch is on. It can show different words on and off.
 class ToggleChip : public juce::Component
 {
 public:
-    ToggleChip (juce::AudioProcessorValueTreeState&, const juce::String& paramId, const juce::String& text, float textSize = 13.0f);
+    ToggleChip (juce::AudioProcessorValueTreeState&, const juce::String& paramId, const juce::String& text,
+                const juce::String& onText = {}, bool fillWhenOn = true, float textSize = 13.0f);
     void paint (juce::Graphics&) override;
     void mouseDown (const juce::MouseEvent&) override;
+    bool isOn() const { return on; }
 
 private:
-    juce::String text;
+    juce::String text, onText;
+    bool fill;
     float textSize;
     bool on = false;
     std::unique_ptr<juce::ParameterAttachment> attachment;
 };
 
-// WET / LATCH / HIDE: pick a mode and tap it again to engage, like the PLUS II footswitch.
-class FootswitchPills : public juce::Component
+// A plain pill button that runs a function.
+class ActionChip : public juce::Component
 {
 public:
-    explicit FootswitchPills (juce::AudioProcessorValueTreeState&);
-    void paint (juce::Graphics&) override;
-    void mouseDown (const juce::MouseEvent&) override;
+    ActionChip (const juce::String& t, std::function<void()> fn, float textSize = 12.0f)
+        : text (t), action (std::move (fn)), size (textSize) { setMouseCursor (juce::MouseCursor::PointingHandCursor); }
+    void paint (juce::Graphics& g) override;
+    void mouseDown (const juce::MouseEvent&) override { if (action) action(); }
+    void setLit (bool l) { if (l != lit) { lit = l; repaint(); } }
+    void setText (const juce::String& t) { if (t != text) { text = t; repaint(); } }
 
 private:
-    juce::Rectangle<float> cell (int i) const;
-    juce::AudioProcessorValueTreeState& state;
-    std::unique_ptr<juce::ParameterAttachment> modeAttachment, onAttachment;
-    int mode = 0;
-    bool on = false;
+    juce::String text;
+    std::function<void()> action;
+    float size;
+    bool lit = false;
 };
 
 class FlipLookAndFeel : public juce::LookAndFeel_V4
 {
 public:
     void drawRotarySlider (juce::Graphics&, int x, int y, int w, int h, float pos, float start, float end, juce::Slider&) override;
-    void drawButtonBackground (juce::Graphics&, juce::Button&, const juce::Colour&, bool highlighted, bool down) override;
-    void drawButtonText (juce::Graphics&, juce::TextButton&, bool highlighted, bool down) override;
 };
 
 // A knob drawn as a small clock face, with its name above and value below.
 class Dial : public juce::Component
 {
 public:
-    Dial (juce::AudioProcessorValueTreeState&, const juce::String& paramId, const juce::String& caption, bool redHand = false);
+    Dial (juce::AudioProcessorValueTreeState&, const juce::String& paramId, const juce::String& caption, bool redHand = false, bool secondary = false);
     void paint (juce::Graphics&) override;
     void resized() override;
 
@@ -118,7 +131,7 @@ private:
     juce::Slider slider;
     juce::RangedAudioParameter* param = nullptr;
     juce::String caption;
-    bool red = false;
+    bool secondary = false;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> attachment;
 };
 
@@ -154,19 +167,8 @@ private:
     AfterglowProcessor& proc;
 };
 
-// Lights up when HOLD NONE and TONE fully down open a piano mode.
-class PianoBox : public juce::Component
-{
-public:
-    explicit PianoBox (AfterglowProcessor& p) : proc (p) {}
-    void paint (juce::Graphics&) override;
-
-private:
-    AfterglowProcessor& proc;
-};
-
-// The brass pedal: click and hold to sustain, drag up to ease off, two quick
-// clicks clear. Shows the real depth, whether from here, MIDI or the latch.
+// The brass pedal: click and hold to sustain, drag up to ease off. Shows the real
+// depth, whichever source is pressing it. Right-click to teach it a key or a strip.
 class BrassPedal : public juce::Component
 {
 public:
@@ -178,27 +180,30 @@ public:
 
 private:
     void set (float v);
+    void menu();
     AfterglowProcessor& proc;
     juce::RangedAudioParameter* param = nullptr;
     bool held = false;
 };
 
-class LearnButton : public juce::Component
+// The Bypass footswitch.
+class BypassSwitch : public juce::Component
 {
 public:
-    explicit LearnButton (AfterglowProcessor& p) : proc (p) { setMouseCursor (juce::MouseCursor::PointingHandCursor); }
+    explicit BypassSwitch (AfterglowProcessor&);
     void paint (juce::Graphics&) override;
-    void mouseDown (const juce::MouseEvent&) override { proc.startLearn(); }
+    void mouseDown (const juce::MouseEvent&) override;
 
 private:
-    AfterglowProcessor& proc;
+    bool on = false;
+    std::unique_ptr<juce::ParameterAttachment> attachment;
 };
 
-// A / LIVE / B. Hold A or B to save into it.
-class PresetToggle : public juce::Component, private juce::Timer
+// Sixteen user presets in red, yellow, green and blue banks.
+class PresetBanks : public juce::Component, private juce::Timer
 {
 public:
-    explicit PresetToggle (AfterglowProcessor&);
+    explicit PresetBanks (AfterglowProcessor& p) : proc (p) { setMouseCursor (juce::MouseCursor::PointingHandCursor); }
     void paint (juce::Graphics&) override;
     void mouseDown (const juce::MouseEvent&) override;
     void mouseUp (const juce::MouseEvent&) override;
@@ -207,40 +212,103 @@ private:
     void timerCallback() override;
     juce::Rectangle<float> cell (int i) const;
     AfterglowProcessor& proc;
-    int pressedCell = -1;
-    double downAt = 0, savedFlashUntil = 0;
-    int savedCell = -1;
+    int pressed = -1, flashSlot = -1;
+    double downAt = 0, flashUntil = 0;
     bool saved = false;
 };
 
-class BypassButton : public juce::Component
+enum class View { Main, Pedal };
+
+// One footswitch on the Pedal page: its jobs, what it listens for, Learn and Defaults.
+class FootswitchCard : public juce::Component
 {
 public:
-    explicit BypassButton (AfterglowProcessor&);
+    FootswitchCard (AfterglowProcessor&, int sw);
+    void paint (juce::Graphics&) override;
+    void resized() override;
+    void tick();
+
+private:
+    AfterglowProcessor& proc;
+    int sw;
+    FlipCard letter;
+    ActionChip learn, reset;
+    std::unique_ptr<ToggleChip> sustain;
+    juce::String sends;
+};
+
+// The Keep button: two lines, centred, and a right-click menu.
+class BigButton : public juce::Component
+{
+public:
+    std::function<void()> onDown, onRightClick;
+    void set (const juce::String& main, const juce::String& small, juce::Colour border);
+    void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override { pressed = false; repaint(); }
+
+private:
+    juce::String mainText, smallText;
+    juce::Colour borderColour = ff::line;
+    bool pressed = false;
+};
+
+// Small A to D squares that act exactly like the footswitches, and light when one is pressed.
+class MiniFoot : public juce::Component
+{
+public:
+    MiniFoot (AfterglowProcessor& p, int s) : proc (p), sw (s) { setMouseCursor (juce::MouseCursor::PointingHandCursor); }
+    void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override { proc.footDown (sw); }
+    void mouseUp (const juce::MouseEvent&) override { proc.footUp (sw); }
+
+private:
+    AfterglowProcessor& proc;
+    int sw;
+};
+
+// "FOOTSWITCHES": a dot that lights when the footswitch is heard, and a menu for where it's read from.
+class FootInputLabel : public juce::Component
+{
+public:
+    explicit FootInputLabel (AfterglowProcessor& p) : proc (p) { setMouseCursor (juce::MouseCursor::PointingHandCursor); }
     void paint (juce::Graphics&) override;
     void mouseDown (const juce::MouseEvent&) override;
 
 private:
-    std::unique_ptr<juce::ParameterAttachment> attachment;
-    bool bypassed = false;
+    AfterglowProcessor& proc;
 };
 
-// The bottom bar: Pebble and what the engine is doing.
-class PebbleStrip : public juce::Component
+// The expression pedal's live position. Click for its target, Learn, Calibrate and the pedal's MIDI map.
+class ExpressionMeter : public juce::Component
 {
 public:
-    explicit PebbleStrip (AfterglowProcessor& p) : proc (p) {}
-    void update (double now, double dt);
+    explicit ExpressionMeter (AfterglowProcessor& p) : proc (p) { setMouseCursor (juce::MouseCursor::PointingHandCursor); }
     void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;
 
 private:
-    void paintPebble (juce::Graphics&, juce::Rectangle<float> area);
+    AfterglowProcessor& proc;
+};
+
+// Pebble from Flip Fella. Eyes pop when a layer is caught, it holds its breath while
+// layers are held, rings stack above it as layers build, spiral eyes at infinity, a halo
+// in the piano modes, startled when cleared. Taps its foot on the footswitches, leans
+// with the expression pedal and nods for Keeper.
+class Pebble : public juce::Component
+{
+public:
+    explicit Pebble (AfterglowProcessor& p) : proc (p) {}
+    void update (double now, double dt);
+    void paint (juce::Graphics&) override;
+    void nod() { nodding = 1.0f; }
+
+private:
     AfterglowProcessor& proc;
     double now = 0, lastSound = 0, nextBlink = 2.0, blinkUntil = 0, catchUntil = 0, clearUntil = 0, clipUntil = 0;
-    int lastCaptures = 0, lastClears = 0, active = 0, rising = 0, held = 0, mode = 0;
-    float hop = 0, level = 0;
-    bool asleep = false, blinking = false, down = false, infinite = false, bypassed = false;
-    juce::String status, detail;
+    int lastCaptures = 0, lastClears = 0, lastPulse = 0, active = 0, held = 0, mode = 0;
+    float hop = 0, lean = 0, nodding = 0, level = 0;
+    bool asleep = false, blinking = false, down = false, infinite = false;
 };
 } // namespace ui
 
@@ -256,44 +324,61 @@ public:
 private:
     void timerCallback() override;
     void section (juce::Graphics&, juce::Rectangle<int>) const;
+    void setView (ui::View);
+    void keeperMenu();
+    void closeNote (bool save);
 
     AfterglowProcessor& proc;
     ui::FlipLookAndFeel lnf;
     double lastTick = 0;
+    ui::View view = ui::View::Main;
+    std::vector<juce::Component*> mainPage;
 
     // header
-    ui::FootswitchPills footswitch;
-    ui::ToggleChip killDry;
-    ui::PresetToggle presets;
+    ui::Pills inputMode;
+    ui::ActionChip viewMain, viewPedal;
+
+    // pedal page
+    std::array<std::unique_ptr<ui::FootswitchCard>, 4> footCards;
 
     // layers
     ui::FlipCard stateCard, countCard;
     ui::LayersDial layersDial;
     ui::Pills catchMode;
+    ui::ActionChip clear;
 
-    // envelope
-    ui::Dial rise, decay;
+    // shape
+    ui::Dial rise, decay, tone, resonance;
     ui::Pills holdMode;
-    ui::LayerLanes lanes;
 
-    // tone + resonance
-    ui::Dial tone, resonance, level, input;
-    ui::PianoBox pianoBox;
+    // level and lanes
+    ui::Dial level, input;
+    ui::LayerLanes lanes;
 
     // fx loop
     ui::FlipCard fxCard;
-    ui::Pills fxPos;
+    ui::Pills fxType, fxPos;
     ui::Dial fxAmount, fxMix;
-    ui::Pills fxType;
+    ui::ToggleChip killDry, auxOn;
+    ui::Pills auxMode;
 
-    // bottom bar
-    ui::PebbleStrip strip;
+    // strip
+    ui::Pebble pebble;
     ui::BrassPedal pedal;
-    ui::LearnButton learn;
-    juce::TextButton clear { "CLEAR" };
-    ui::BypassButton bypass;
+    ui::PresetBanks banks;
+    std::array<std::unique_ptr<ui::MiniFoot>, 4> minis;
+    ui::FootInputLabel footInput;
+    ui::ExpressionMeter expression;
+    ui::BypassSwitch bypass;
 
-    juce::String fxMeaning, holdMeaning;
+    // Keeper
+    ui::BigButton keepButton;
+    ui::FlipCard contextCard;
+    juce::TextEditor noteEditor;
+    int noteNumber = 0, lastKeepPulse = 0, lastMode = -1;
+    double keptUntil = 0.0, noteUntil = 0.0;
+
+    juce::String holdHint, posHint, auxHint, mood, moodSub;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AfterglowEditor)
 };

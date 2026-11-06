@@ -6,6 +6,7 @@
 // Usage: afterglow_render_test [output_folder]
 
 #include "AfterglowEngine.h"
+#include <chrono>
 #include <cstdio>
 #include <functional>
 #include <string>
@@ -72,6 +73,32 @@ struct Result
         return c > 0 ? (float) std::sqrt (s / (2.0 * c)) : 0.0f;
     }
 };
+
+// Pitch (cents from f0) and purity (energy on the harmonics against everything else) of a held stretch
+static void heldQuality (const std::vector<float>& x, float t0, float t1, float f0, int harmonics, float& cents, float& purityDb)
+{
+    const int a = (int) (t0 * kFs), len = (int) ((t1 - t0) * kFs);
+    const int nfft = nextPow2 (len * 4);
+    Fft f; f.init (nfft);
+    std::vector<std::complex<float>> b ((size_t) nfft);
+    for (int i = 0; i < len; ++i)
+        b[(size_t) i] = { x[(size_t) (a + i)] * (0.5f - 0.5f * std::cos (kTwoPi * (float) i / (float) len)), 0.0f };
+    f.run (b.data(), false);
+    const float bin = kFs / (float) nfft;
+    auto pw = [&] (int k) { return std::norm (b[(size_t) k]); };
+    int kp = (int) (f0 * 0.97f / bin);
+    for (int k = kp; k <= (int) (f0 * 1.03f / bin); ++k) if (pw (k) > pw (kp)) kp = k;
+    const float A = std::log (pw (kp - 1)), B = std::log (pw (kp)), C = std::log (pw (kp + 1));
+    cents = 1200.0f * std::log2 (((float) kp + 0.5f * (A - C) / (A - 2 * B + C)) * bin / f0);
+    double tonal = 0, rest = 0;
+    for (int k = (int) (40.0f / bin); k < (int) (12000.0f / bin); ++k)
+    {
+        bool near = false;
+        for (int h = 1; h <= harmonics; ++h) near = near || std::fabs ((float) k * bin - f0 * (float) h) < 6.0f;
+        (near ? tonal : rest) += pw (k);
+    }
+    purityDb = (float) (10.0 * std::log10 (tonal / (rest + 1.0e-30)));
+}
 
 using Script = std::function<void (float t, EngineParams&, AfterglowEngine&)>;
 
@@ -156,7 +183,7 @@ int main (int argc, char** argv)
         check ("unity-level", r);
         const float held = r.rmsBetween (2.0f, 2.9f);
         std::printf ("  held level %.3f vs input %.3f (ratio %.2f)\n", held, 0.3f * 0.7071f, held / (0.3f * 0.7071f));
-        expect (held > 0.15f && held < 0.3f, "held layer not near unity", "unity-level");
+        expect (held > 0.19f && held < 0.235f, "held layer not within 1 dB of the input", "unity-level");
         expect (r.rmsBetween (3.6f, 4.0f) < 0.5f * held, "did not fade on release", "unity-level");
     }
 
@@ -291,6 +318,115 @@ int main (int argc, char** argv)
         // Loud: ten layers of chords with the dry on must stay under full scale
         auto p = base; p.killDry = false; p.layers = 10; p.decay = 1.0f; p.levelDb = 6.0f;
         check ("loud-wall", render ("loud-wall", p, holdPedal (0.1f, 9.0f), out, 10.0f, 220.0f, 10));
+    }
+
+    {
+        // A held note must stay in tune and pure: no smear, no frame-rate grain.
+        // The first engine held guitar notes up to 31 cents sharp with as much noise as tone.
+        for (int bass = 0; bass < 2; ++bass)
+        {
+            const float f0 = bass ? 41.2f : 220.0f;
+            std::vector<float> note ((size_t) (6.0f * kFs), 0.0f);
+            for (int i = (int) (0.2f * kFs); i < (int) (2.0f * kFs); ++i)
+            {
+                const float t = (float) i / kFs - 0.2f;
+                float v = 0.0f;
+                for (int h = 1; h <= 8; ++h) v += std::sin (kTwoPi * f0 * (float) h * t) / (float) h;
+                note[(size_t) i] = 0.25f * v * std::exp (-t * 1.5f) * std::min (1.0f, t * 400.0f) * std::min (1.0f, (1.8f - t) * 200.0f);
+            }
+            auto p = base; p.layers = 1; p.catchMode = CatchSingle; p.decay = 1.0f; p.inputMode = bass ? InputBass : InputGuitar;
+            const char* name = bass ? "held-purity-bass" : "held-purity";
+            auto r = render (name, p, holdPedal (0.95f, 6.0f), out, 6.0f, 220.0f, 0, &note);
+            check (name, r);
+            float cents = 0, purity = 0;
+            heldQuality (r.l, 3.0f, 5.8f, f0, 8, cents, purity);
+            std::printf ("  pitch %+.2f cents, purity %.1f dB\n", cents, purity);
+            expect (std::fabs (cents) < 3.0f, "held note out of tune", name);
+            expect (purity > 18.0f, "held note smeared or noisy", name);
+        }
+    }
+
+    // ---- lessons from the other plugins (Speckle, November 2026) ----
+    {
+        // soft playing, 30 dB down: layers still catch and come back at the playing level
+        std::vector<float> soft ((size_t) (7.0f * kFs));
+        {
+            std::vector<float> l, r;
+            makeInput (l, r, (int) soft.size());
+            for (size_t i = 0; i < soft.size(); ++i) soft[i] = l[i] * 0.0316f;
+        }
+        auto p = base; p.layers = 4;
+        int caught = 0;
+        auto r = render ("soft-playing", p, [&] (float t, EngineParams& q, AfterglowEngine& e) { q.pedal = t > 0.1f && t < 6.0f ? 1.0f : 0.0f; caught = e.uiCaptures.load(); },
+                         out, 7.0f, 220.0f, 6, &soft);
+        check ("soft-playing", r, false);
+        expect (caught >= 4, "soft notes not caught", "soft-playing");
+        expect (r.rmsBetween (4.5f, 5.5f) > 0.0015f, "soft layers came back too quiet", "soft-playing");
+    }
+    {
+        // a pad with no attack, changing chord: the synth input catches each chord
+        std::vector<float> pad ((size_t) (9.0f * kFs), 0.0f);
+        const float chords[3][3] = { { 220.0f, 277.2f, 329.6f }, { 246.9f, 311.1f, 370.0f }, { 196.0f, 246.9f, 293.7f } };
+        for (size_t i = 0; i < pad.size(); ++i)
+        {
+            const float t = (float) i / kFs;
+            const int c = std::min (2, (int) (t / 2.5f));
+            const float swell = std::min (1.0f, t * 0.8f);
+            float v = 0.0f;
+            for (int k = 0; k < 3; ++k)
+                for (int h = 1; h <= 5; ++h)
+                    v += std::sin (kTwoPi * chords[c][k] * (float) h * t) / (float) (h * 3);
+            pad[i] = 0.12f * swell * v;
+        }
+        auto p = base; p.layers = 6; p.inputMode = InputSynth;
+        int caught = 0;
+        auto r = render ("synth-pad-changes", p, [&] (float t, EngineParams& q, AfterglowEngine& e) { q.pedal = t > 0.3f ? 1.0f : 0.0f; caught = e.uiCaptures.load(); },
+                         out, 9.0f, 220.0f, 0, &pad);
+        check ("synth-pad-changes", r);
+        expect (caught >= 3, "pad chord changes not caught", "synth-pad-changes");
+        expect (caught <= 6, "a steady pad was caught over and over", "synth-pad-changes");
+    }
+    {
+        // the first note starts late, long after loading: the first catch must hold the note
+        std::vector<float> late ((size_t) (8.0f * kFs), 0.0f);
+        {
+            std::vector<float> l, r;
+            makeInput (l, r, (int) (3.0f * kFs), 220.0f, 2);
+            for (size_t i = 0; i < l.size(); ++i) late[i + (size_t) (4.0f * kFs)] = l[i];
+        }
+        auto p = base; p.layers = 2;
+        auto r = render ("late-start", p, holdPedal (0.1f, 7.9f), out, 8.0f, 220.0f, 0, &late);
+        check ("late-start", r);
+        expect (r.rmsBetween (6.0f, 7.5f) > 0.03f, "late note not held", "late-start");
+    }
+    {
+        // bass input: a low E held in tune with the larger analysis
+        auto p = base; p.layers = 3; p.inputMode = InputBass;
+        check ("bass-input", render ("bass-input", p, holdPedal (0.1f, 6.0f), out, 7.0f, 41.2f, 4));
+    }
+
+    // CPU per instance at 48 kHz, as Ableton runs it, at the busiest settings: ten layers held,
+    // Resonance on, shimmer in the loop, bass analysis. Reported on every build.
+    {
+        std::printf ("\nCPU per instance at 48 kHz (share of one core, busiest settings)\n");
+        for (int block : { 64, 128 })
+        {
+            static AfterglowEngine eng;
+            auto p = base;
+            p.layers = 10; p.decay = 1.0f; p.resonance = 0.7f; p.fxType = FxShimmer; p.fxMix = 0.5f; p.fxAmount = 0.8f; p.killDry = false; p.inputMode = InputBass;
+            eng.prepare (kFs);
+            const int n = (int) (12.0f * kFs);
+            std::vector<float> l, r;
+            makeInput (l, r, n, 110.0f, 12);
+            const auto t0 = std::chrono::steady_clock::now();
+            for (int s = 0; s < n; s += block)
+            {
+                p.pedal = s > (int) (0.1f * kFs) ? 1.0f : 0.0f;
+                eng.process (l.data() + s, r.data() + s, std::min (block, n - s), p);
+            }
+            const double secs = std::chrono::duration<double> (std::chrono::steady_clock::now() - t0).count();
+            std::printf ("  %3d sample buffer: %.1f%% with %d layers held\n", block, 100.0 * secs / 12.0, eng.uiActive.load());
+        }
     }
 
     std::printf (failures == 0 ? "All scenarios passed\n" : "%d check(s) failed\n", failures);
